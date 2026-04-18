@@ -30,9 +30,9 @@ class AgentPlanner:
     """
 
     def __init__(self, cfg: dict):
-        self.model = cfg["llm_model"]
-        self.max_tokens = cfg["llm_max_tokens"]
-        self.intent_top_items = cfg["intent_top_items"]
+        self.model = cfg.llm_model
+        self.max_tokens = cfg.llm_max_tokens
+        self.intent_top_items = cfg.intent_top_items
         self._client = None  # Anthropic client, initialised lazily
 
     # ── Core planning ─────────────────────────────────────────────────────────

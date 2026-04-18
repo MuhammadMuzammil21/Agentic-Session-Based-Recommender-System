@@ -34,8 +34,58 @@ User Session
 
 ## Setup
 
+### 1. Create a virtual environment
+
+**Windows (PowerShell)**
+```powershell
+python -m venv .venv
+```
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+```
+
+### 2. Activate the virtual environment
+
+**Windows (PowerShell)**
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+> If you get an execution-policy error, run once:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+**Windows (Command Prompt)**
+```cmd
+.venv\Scripts\activate.bat
+```
+
+**macOS / Linux**
+```bash
+source .venv/bin/activate
+```
+
+Your prompt will show `(.venv)` when the environment is active.
+
+### 3. Install dependencies
+
 ```bash
 pip install -r requirements.txt
+```
+
+### 4. Verify the installation
+
+```bash
+pytest tests/ -v
+```
+
+All tests should pass with no errors.
+
+### Deactivate
+
+```bash
+deactivate
 ```
 
 ## Quick Start

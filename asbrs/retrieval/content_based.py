@@ -15,7 +15,7 @@ class ContentBasedRetriever:
     """Retrieve candidates via item content similarity of session embedding."""
 
     def __init__(self, cfg: dict):
-        self.top_k = cfg["content_top_k"]
+        self.top_k = cfg.content_top_k
         self._item_matrix: np.ndarray | None = None  # (num_items, dim)
 
     # ── Fitting ───────────────────────────────────────────────────────────────

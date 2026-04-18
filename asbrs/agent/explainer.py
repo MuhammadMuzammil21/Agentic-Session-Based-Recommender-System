@@ -16,8 +16,8 @@ class Explainer:
     """Produce human-readable recommendation explanations via LLM."""
 
     def __init__(self, cfg: dict):
-        self.model = cfg["llm_model"]
-        self.max_tokens = cfg["llm_max_tokens"]
+        self.model = cfg.llm_model
+        self.max_tokens = cfg.llm_max_tokens
         self._client = None  # Anthropic client, initialised lazily
 
     def explain(

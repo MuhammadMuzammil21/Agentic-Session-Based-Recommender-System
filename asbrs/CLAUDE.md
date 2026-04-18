@@ -10,7 +10,7 @@ Session-based recommender system for Amazon Electronics dataset.
 |--------|--------|-------|
 | Bootstrap | ✓ | |
 | 01 Data Pipeline | ✓ | 53/53 tests passing |
-| 02 Session Encoder | ☐ | |
+| 02 Session Encoder | ✓ | 27/27 tests passing (99 total) |
 | 03 Retrieval | ☐ | |
 | 04 Agentic Planner | ☐ | |
 | 05 Evaluation | ☐ | |
@@ -27,6 +27,9 @@ Session-based recommender system for Amazon Electronics dataset.
 - Streaming: load_dataset() at module level (enables test mocking via patch)
 - Sessions: greedy gap-splitting (window_hours threshold); left-one-out split for train/val/test
 - Encoding: left-pad with PAD token; truncate to most-recent max_len items
+- Attention: mean-pooled query, multi-head projection, masked softmax (PAD=-1e9)
+- Training: cross-entropy over full vocab (no negative sampling); gradient clipping at 1.0
+- Checkpoint naming: epoch_{n:03d}_recall{val:.4f}.pt; early stopping on Recall@10
 
 ### Data Schema
 
@@ -77,7 +80,36 @@ class EncodedSession:
 | encoded_test.pkl    | List[EncodedSession]          |
 
 ### Model Architecture
-(Fill in after Module 02)
+
+#### SessionEncoder Pipeline
+```
+input_ids [B, L]
+    → ItemEmbedding (Xavier init, PAD zeroed, dropout)        → [B, L, D]
+    → PackedGRU (batch_first=True)                            → [B, L, H]
+    → SelfAttentionLayer (mean-query, masked softmax)         → session_repr [B, H]
+                                                              → attn_weights  [B, L]
+
+predict_scores: session_repr [B, H] × item_embs [V, D]ᵀ      → scores [B, V]
+```
+
+#### Key Dimensions
+| Symbol | Meaning              | Config key              |
+|--------|----------------------|-------------------------|
+| B      | Batch size           | training.batch_size     |
+| L      | Max sequence length  | model.max_seq_len       |
+| D      | Embedding dim        | model.embedding_dim     |
+| H      | Hidden (GRU) dim     | model.hidden_dim        |
+| V      | Vocabulary size      | (from vocab.json)       |
+
+#### Training
+- **Loss**: Cross-entropy over full vocabulary
+- **Optimiser**: Adam (lr, weight_decay from config)
+- **Grad clip**: max_norm=1.0
+- **Early stopping**: patience on val Recall@10
+- **Checkpoint**: `checkpoints/epoch_{n:03d}_recall{val:.4f}.pt`
+
+#### Evaluation
+- Recall@K and MRR@K for K in cfg.evaluation.k_values
 
 ### File Paths & Config
 - Raw data: data/raw/

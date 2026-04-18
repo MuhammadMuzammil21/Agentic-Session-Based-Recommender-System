@@ -18,7 +18,7 @@ class Reranker:
     """
 
     def __init__(self, cfg: dict):
-        self.final_top_k = cfg["final_top_k"]
+        self.final_top_k = cfg.final_top_k
 
     def rerank(
         self,

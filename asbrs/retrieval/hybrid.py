@@ -26,7 +26,7 @@ class HybridRetriever:
     ):
         self.cf = cf
         self.cb = cb
-        self.final_top_k = cfg["final_top_k"]
+        self.final_top_k = cfg.final_top_k
         self.alpha = alpha  # weight for CF vs CB scores
 
     def retrieve(

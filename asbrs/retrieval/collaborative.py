@@ -15,7 +15,7 @@ class CollaborativeRetriever:
     """Retrieve candidates via user–item collaborative signals."""
 
     def __init__(self, cfg: dict):
-        self.top_k = cfg["cf_top_k"]
+        self.top_k = cfg.cf_top_k
         self._similarity_matrix: np.ndarray | None = None
 
     # ── Fitting ───────────────────────────────────────────────────────────────

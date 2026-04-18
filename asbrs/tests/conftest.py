@@ -1,17 +1,21 @@
-"""
-conftest.py — Shared pytest fixtures for ASBRS test suite.
-"""
+"""conftest.py — Shared pytest fixtures for ASBRS test suite."""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
+
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 @pytest.fixture(scope="session")
 def cfg():
-    """Return the full project config dict."""
-    from config.settings import CFG
-    return CFG
+    """Return the typed Config object loaded from config/config.yaml."""
+    from config.settings import Config
+    return Config.load(PROJECT_ROOT / "config" / "config.yaml")
 
 
 @pytest.fixture
