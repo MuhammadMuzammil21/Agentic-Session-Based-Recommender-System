@@ -1,0 +1,55 @@
+project:
+  name: "ASBRS"
+  seed: 42
+  version: "1.0.0"
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  dataset: "amazon_electronics_2023"
+  download_url: "https://amazon-reviews-2023.github.io"
+  hf_dataset_name: "McAuley-Lab/Amazon-Reviews-2023"
+  hf_category_reviews: "raw_review_Electronics"
+  hf_category_meta: "raw_meta_Electronics"
+  max_streaming_records: 500000   # adjust based on RAM
+  min_session_len: 3
+  max_session_len: 50
+  session_window_hours: 24
+  min_item_freq: 5
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+model:
+  embedding_dim: 64
+  hidden_dim: 128
+  num_attention_heads: 4
+  dropout: 0.2
+  max_seq_len: 50
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1e-5
+  num_epochs: 20
+  patience: 5
+  checkpoint_dir: "checkpoints"
+
+retrieval:
+  cf_top_k: 100
+  content_top_k: 100
+  final_top_k: 20
+
+agent:
+  llm_model: "claude-haiku-3-5-20251001"
+  llm_max_tokens: 200
+  intent_top_items: 3
+
+evaluation:
+  k_values: [5, 10, 20]
+  num_negatives: 99
+
+demo:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
