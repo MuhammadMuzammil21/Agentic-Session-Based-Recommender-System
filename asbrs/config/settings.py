@@ -1,32 +1,211 @@
-"""
-settings.py — Load and expose typed config from config.yaml.
+"""config/settings.py — Typed configuration dataclasses for ASBRS.
+
+Loads config/config.yaml and exposes nested, validated Config objects.
 """
 
-import os
-import yaml
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import List
 
-_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
-def load_config(path: str | Path = _CONFIG_PATH) -> dict:
-    """Load YAML config and return as a nested dict."""
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+# ── Sub-configs ───────────────────────────────────────────────────────────────
 
 
-# Singleton config object loaded at import time
-CFG = load_config()
+@dataclass
+class ProjectConfig:
+    """Top-level project metadata."""
 
-# ── Convenience accessors ────────────────────────────────────────────────────
+    name: str
+    seed: int
+    version: str
 
-PROJECT = CFG["project"]
-DATA = CFG["data"]
-MODEL = CFG["model"]
-TRAINING = CFG["training"]
-RETRIEVAL = CFG["retrieval"]
-AGENT = CFG["agent"]
-EVALUATION = CFG["evaluation"]
-DEMO = CFG["demo"]
 
-SEED: int = PROJECT["seed"]
+@dataclass
+class DataConfig:
+    """Data pipeline configuration."""
+
+    raw_dir: str
+    processed_dir: str
+    dataset: str
+    download_url: str
+    hf_dataset_name: str
+    hf_category_reviews: str
+    hf_category_meta: str
+    max_streaming_records: int
+    min_session_len: int
+    max_session_len: int
+    session_window_hours: int
+    min_item_freq: int
+    train_split: float
+    val_split: float
+    test_split: float
+
+
+@dataclass
+class ModelConfig:
+    """Neural model architecture hyper-parameters."""
+
+    embedding_dim: int
+    hidden_dim: int
+    num_attention_heads: int
+    dropout: float
+    max_seq_len: int
+
+
+@dataclass
+class TrainingConfig:
+    """Training loop configuration."""
+
+    batch_size: int
+    lr: float
+    weight_decay: float
+    num_epochs: int
+    patience: int
+    checkpoint_dir: str
+
+
+@dataclass
+class RetrievalConfig:
+    """Retrieval module settings."""
+
+    cf_top_k: int
+    content_top_k: int
+    final_top_k: int
+
+
+@dataclass
+class AgentConfig:
+    """Agentic planner settings."""
+
+    llm_model: str
+    llm_max_tokens: int
+    intent_top_items: int
+
+
+@dataclass
+class EvaluationConfig:
+    """Evaluation protocol settings."""
+
+    k_values: List[int]
+    num_negatives: int
+
+
+@dataclass
+class DemoConfig:
+    """Flask demo server settings."""
+
+    host: str
+    port: int
+    debug: bool
+
+
+# ── Root Config ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Config:
+    """Root configuration object for ASBRS.
+
+    Example:
+        cfg = Config.load("config/config.yaml")
+        cfg.validate()
+    """
+
+    project: ProjectConfig
+    data: DataConfig
+    model: ModelConfig
+    training: TrainingConfig
+    retrieval: RetrievalConfig
+    agent: AgentConfig
+    evaluation: EvaluationConfig
+    demo: DemoConfig
+
+    # ── Construction ──────────────────────────────────────────────────────────
+
+    @classmethod
+    def load(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
+        """Load and parse config.yaml into a typed Config instance.
+
+        Args:
+            path: Path to the YAML config file.
+
+        Returns:
+            Fully populated Config object.
+
+        Raises:
+            FileNotFoundError: If the config file does not exist.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        with path.open("r") as fh:
+            raw: dict = yaml.safe_load(fh)
+
+        logger.debug("Loaded config from %s", path)
+
+        return cls(
+            project=ProjectConfig(**raw["project"]),
+            data=DataConfig(**raw["data"]),
+            model=ModelConfig(**raw["model"]),
+            training=TrainingConfig(**raw["training"]),
+            retrieval=RetrievalConfig(**raw["retrieval"]),
+            agent=AgentConfig(**raw["agent"]),
+            evaluation=EvaluationConfig(**raw["evaluation"]),
+            demo=DemoConfig(**raw["demo"]),
+        )
+
+    # ── Validation ────────────────────────────────────────────────────────────
+
+    def validate(self) -> None:
+        """Validate configuration values.
+
+        Raises:
+            ValueError: If any value is out of an acceptable range.
+        """
+        d = self.data
+        splits_sum = d.train_split + d.val_split + d.test_split
+        if abs(splits_sum - 1.0) > 1e-6:
+            raise ValueError(
+                f"data splits must sum to 1.0, got {splits_sum:.4f}"
+            )
+        if d.min_session_len < 2:
+            raise ValueError(
+                f"min_session_len must be >= 2, got {d.min_session_len}"
+            )
+        if d.min_session_len > d.max_session_len:
+            raise ValueError(
+                "min_session_len must be <= max_session_len, "
+                f"got {d.min_session_len} > {d.max_session_len}"
+            )
+        if d.min_item_freq < 1:
+            raise ValueError(
+                f"min_item_freq must be >= 1, got {d.min_item_freq}"
+            )
+
+        m = self.model
+        if m.hidden_dim % m.num_attention_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({m.hidden_dim}) must be divisible by "
+                f"num_attention_heads ({m.num_attention_heads})"
+            )
+        if not 0.0 <= m.dropout < 1.0:
+            raise ValueError(
+                f"dropout must be in [0, 1), got {m.dropout}"
+            )
+
+        if not self.evaluation.k_values:
+            raise ValueError("evaluation.k_values must be non-empty")
+
+        logger.debug("Config validation passed")
