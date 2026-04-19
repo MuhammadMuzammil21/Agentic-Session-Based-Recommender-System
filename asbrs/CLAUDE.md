@@ -12,7 +12,7 @@ Session-based recommender system for Amazon Electronics dataset.
 | 01 Data Pipeline | ✓ | 53/53 tests passing |
 | 02 Session Encoder | ✓ | 27/27 tests passing (99 total) |
 | 03 Retrieval | ✓ | 35/35 tests passing |
-| 04 Agentic Planner | ☐ | |
+| 04 Agentic Planner | ✓ | 28/28 tests passing |
 | 05 Evaluation | ☐ | |
 | 06 Demo UI | ☐ | |
 | Integration | ☐ | |
@@ -20,7 +20,7 @@ Session-based recommender system for Amazon Electronics dataset.
 ### Key Decisions Log
 - Dataset: Amazon Reviews 2023, Electronics subset
 - Framework: PyTorch for neural components
-- LLM API: Anthropic Claude (claude-haiku-3-5-20251001 for cost efficiency)
+- LLM API: Gemini 2.5 Flash via google-genai SDK (aistudio.google.com — free, no credit card)
 - Evaluation: leave-one-out, Recall@K + MRR@K + HitRate@K for K in [5,10,20]
 - Config: Typed nested dataclasses (Config.load / Config.validate) in config/settings.py
 - Vocab: JSON-backed Vocabulary (PAD=0, UNK=1); built from training items only
@@ -33,6 +33,11 @@ Session-based recommender system for Amazon Electronics dataset.
 - CF: Item-based cosine similarity via sklearn (csr_matrix); aggregated column-sum scoring
 - CB: TF-IDF on (title + description + category); np.matrix → np.asarray fix for sklearn 1.6+
 - Hybrid: linear score fusion (cf_weight · cf_score + cb_weight · cb_score); items in only one source get 0 from the other; legacy stubs retained as CollaborativeRetriever/ContentBasedRetriever/_LegacyHybridRetriever
+- LLM: google-genai SDK (google.genai.Client); deprecated google-generativeai replaced
+- IntentPlanner: Gemini 2.5 Flash; JSON prompt → {intent, keywords, confidence}; frozenset cache; markdown-fence strip; default on any parse/API error
+- IntentReranker: TF-IDF on titles; final_score = 0.6·retrieval + 0.4·intent_similarity
+- RecommendationExplainer: template-only (no LLM); attention_heatmap top-5; RecommendationOutput rank is 1-based
+- agent/interfaces.py: IntentResult, RankedItem, RecommendationOutput dataclasses (contracts only)
 
 ### Data Schema
 

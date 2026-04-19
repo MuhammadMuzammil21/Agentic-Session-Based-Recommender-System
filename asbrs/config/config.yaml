@@ -41,7 +41,7 @@ retrieval:
   final_top_k: 20
 
 agent:
-  llm_model: "claude-haiku-3-5-20251001"
+  llm_model: "gemini-2.5-flash"
   llm_max_tokens: 200
   intent_top_items: 3
 

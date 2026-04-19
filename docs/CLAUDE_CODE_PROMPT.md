@@ -163,7 +163,10 @@ Session-based recommender system for Amazon Electronics dataset.
 (Append here as decisions are made)
 - Dataset: Amazon Reviews 2023, Electronics subset
 - Framework: PyTorch for neural components
-- LLM API: Anthropic Claude (claude-haiku-3-5-20251001 for cost efficiency)
+- LLM API: Gemini 2.5 Flash via Google AI Studio (model id: gemini-2.5-flash)
+  → FREE — 1,500 requests/day via Google AI Studio. No credit card needed.
+  → Cache results aggressively (IntentPlanner cache dict) to minimise API calls.
+  → For evaluation/ablation, mock the LLM with unittest.mock to avoid API costs.
 - Evaluation: leave-one-out, Recall@K + MRR@K + HitRate@K for K in [5,10,20]
 
 ### Data Schema
@@ -187,13 +190,12 @@ numpy>=1.24.0
 pandas>=2.0.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
-anthropic>=0.25.0
+google-generativeai>=0.8.0
 flask>=3.0.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
 pytest>=7.4.0
 pytest-cov>=4.1.0
-datasets>=2.18.0
 
 ─────────────────────────────────────────────
 config/config.yaml CONTENTS:
@@ -209,10 +211,6 @@ data:
   processed_dir: "data/processed"
   dataset: "amazon_electronics_2023"
   download_url: "https://amazon-reviews-2023.github.io"
-  hf_dataset_name: "McAuley-Lab/Amazon-Reviews-2023"
-  hf_category_reviews: "raw_review_Electronics"
-  hf_category_meta: "raw_meta_Electronics"
-  max_streaming_records: 500000   # adjust based on RAM
   min_session_len: 3
   max_session_len: 50
   session_window_hours: 24
@@ -242,7 +240,7 @@ retrieval:
   final_top_k: 20
 
 agent:
-  llm_model: "claude-haiku-3-5-20251001"
+  llm_model: "gemini-2.5-flash"
   llm_max_tokens: 200
   intent_top_items: 3
 
@@ -283,43 +281,13 @@ File: data/loader.py
 ─────────────────────────────────────────────
 Implement `AmazonDataLoader` with these public methods:
 
-  stream_reviews(category: str, max_records: int, cfg: Config) -> pd.DataFrame
-    Uses HuggingFace `datasets` with streaming=True so the full dataset is
-    NEVER downloaded to disk. Loads only `max_records` rows from the specified
-    category (default: cfg.data.hf_category_reviews).
-    Returns df with columns:
+  download(url: str, dest_dir: str) -> Path
+    Downloads the Electronics subset. If file exists, skip. Shows tqdm progress.
+
+  load_reviews(filepath: Path) -> pd.DataFrame
+    Reads the JSON/CSV file. Returns df with columns:
     [user_id, item_id, rating, timestamp, title, description, price, category]
-    Logs shape and dtypes after streaming completes.
-
-    Reference implementation:
-
-    ```python
-    from datasets import load_dataset
-
-    def stream_reviews(self, category: str, max_records: int) -> pd.DataFrame:
-        ds = load_dataset(
-            "McAuley-Lab/Amazon-Reviews-2023",
-            category,
-            streaming=True,
-            trust_remote_code=True
-        )
-        records = []
-        for item in ds['full'].take(max_records):
-            records.append({
-                'user_id':   item['user_id'],
-                'item_id':   item['asin'],
-                'rating':    item['rating'],
-                'timestamp': item['timestamp'],
-                'title':     item.get('title', ''),
-                'description': item.get('description', ''),
-                'price':     item.get('price', None),
-                'category':  item.get('main_category', ''),
-            })
-        return pd.DataFrame(records)
-    ```
-
-    NOTE: `download()` and `load_reviews(filepath)` are REMOVED. All raw
-    data ingestion goes through `stream_reviews()` exclusively.
+    Logs shape and dtypes on load.
 
   filter_interactions(df: pd.DataFrame, min_item_freq: int) -> pd.DataFrame
     Removes items appearing fewer than min_item_freq times.
@@ -587,7 +555,10 @@ File: agent/planner.py
 Implement `IntentPlanner`:
 
   __init__(llm_model: str, max_tokens: int)
-    Initialises the Anthropic client. Reads ANTHROPIC_API_KEY from env.
+    Initialises the Gemini client:
+      genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+      self.model = genai.GenerativeModel(llm_model)
+    Get a free API key at aistudio.google.com — no credit card required.
 
   infer_intent(session_items: List[str],
                attention_weights: List[float]) -> IntentResult
@@ -601,6 +572,8 @@ Implement `IntentPlanner`:
       - Provide the top 3 attended items with their attention weights
       - Ask for: 1-sentence purchase intent + 3 keywords + confidence 0–1
       - Request response as JSON: {"intent": "...", "keywords": [...], "confidence": 0.0}
+      - Call: response = self.model.generate_content(prompt)
+        text = response.text
       - Parse JSON response; on parse failure log warning and return a default
       - Cache results in a dict keyed by frozenset(session_items) to avoid
         redundant API calls during evaluation
@@ -663,7 +636,7 @@ Implement `RecommendationExplainer`:
 ─────────────────────────────────────────────
 File: tests/test_agent.py
 ─────────────────────────────────────────────
-Mock all Anthropic API calls using unittest.mock.patch.
+Mock all Gemini API calls using unittest.mock.patch on `google.generativeai.GenerativeModel.generate_content`.
 Test:
   - IntentPlanner returns IntentResult with correct fields on valid JSON response
   - IntentPlanner returns default IntentResult on malformed API response (no crash)
