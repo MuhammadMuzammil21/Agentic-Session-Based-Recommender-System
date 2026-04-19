@@ -13,7 +13,7 @@ Session-based recommender system for Amazon Electronics dataset.
 | 02 Session Encoder | ✓ | 27/27 tests passing (99 total) |
 | 03 Retrieval | ✓ | 35/35 tests passing |
 | 04 Agentic Planner | ✓ | 28/28 tests passing |
-| 05 Evaluation | ☐ | |
+| 05 Evaluation | ✓ | 46/46 tests passing |
 | 06 Demo UI | ☐ | |
 | Integration | ☐ | |
 
@@ -38,6 +38,11 @@ Session-based recommender system for Amazon Electronics dataset.
 - IntentReranker: TF-IDF on titles; final_score = 0.6·retrieval + 0.4·intent_similarity
 - RecommendationExplainer: template-only (no LLM); attention_heatmap top-5; RecommendationOutput rank is 1-based
 - agent/interfaces.py: IntentResult, RankedItem, RecommendationOutput dataclasses (contracts only)
+- evaluation/metrics.py: Pure-function module; new signature recall_at_k(recommended, relevant, k); legacy evaluate_session/aggregate_metrics retained for backwards compat; added evaluate_model(predictions, k_values) and coverage(all_recommendations, catalog_size)
+- evaluation/ablation.py: AblationStudy replaces AblationRunner stub; 4 variants: popularity baseline, CF-only, GRU+attention (no LLM), full agentic; run_all() returns DataFrame with columns [Model|Recall@5|Recall@10|Recall@20|MRR@10|HitRate@10]; save_results() writes CSV + Markdown via tabulate
+- evaluation/human_eval.py: HumanEvalExporter replaces HumanEvalBuilder stub; generate_eval_sheet() samples n_sessions, validates aligned input lengths, writes self-contained HTML with inline CSS, CSS-only 5-star rating fields, no external JS/font dependencies
+- scripts/evaluate.py: Full CLI with argparse; auto-detects best checkpoint; runs ablation; saves CSV/Markdown; generates HTML human-eval sheet; prints final summary line
+- tabulate>=0.9.0 added to requirements.txt (needed for df.to_markdown())
 
 ### Data Schema
 
