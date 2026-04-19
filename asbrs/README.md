@@ -15,7 +15,7 @@ User Session
              │
              ▼
 ┌─────────────────────────┐
-│  Planning Module         │  Anthropic Claude LLM
+│  Planning Module         │  Google Gemini 2.5 Flash LLM
 │  (Agentic Planner)       │  → intent classification + strategy
 └────────────┬────────────┘
              │
@@ -31,6 +31,9 @@ User Session
 │  (Explainer)             │  → user-facing justification
 └─────────────────────────┘
 ```
+
+## Project Status
+Modules 01 through 05 (Data Pipeline, Session Encoder, Retrieval, Agentic Planner, and Evaluation) are completely implemented and integrated, with comprehensive test coverage.
 
 ## Setup
 
@@ -125,6 +128,11 @@ asbrs/
 - **Protocol**: Leave-one-out
 - **Metrics**: Recall@K, MRR@K, HitRate@K for K ∈ {5, 10, 20}
 - **Dataset**: Amazon Reviews 2023, Electronics subset
+- **Ablation Study**: The `scripts/evaluate.py` script automatically pits the full model against 3 baselines:
+  - Popularity baseline
+  - CF-Only baseline
+  - GRU+Attention (No LLM) baseline
+- **Human Eval**: An HTML report is automatically generated at `evaluation/human_eval_sheet.html` to visualize recommendations and their LLM intent explanations using a clean, style-dependent UI.
 
 ## License
 
