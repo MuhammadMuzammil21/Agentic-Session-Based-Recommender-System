@@ -153,7 +153,17 @@ class Config:
         with path.open("r") as fh:
             raw: dict = yaml.safe_load(fh)
 
-        logger.debug("Loaded config from %s", path)
+        # --- Defensive type coercion -------------------------------------------
+        # YAML can parse numeric literals like 1e-5 as strings in some
+        # implementations.  Explicitly cast all float fields before handing
+        # them to the dataclasses so a bad YAML value raises a clear error here
+        # rather than a cryptic TypeError deep inside PyTorch.
+        for key in ("lr", "weight_decay"):
+            raw["training"][key] = float(raw["training"][key])
+        for key in ("train_split", "val_split", "test_split"):
+            raw["data"][key] = float(raw["data"][key])
+        raw["model"]["dropout"] = float(raw["model"]["dropout"])
+        # -----------------------------------------------------------------------
 
         return cls(
             project=ProjectConfig(**raw["project"]),

@@ -67,6 +67,7 @@ class SessionEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.embed_dim = embed_dim
         self.padding_idx = padding_idx
 
         self.item_embedding = ItemEmbedding(
@@ -87,12 +88,20 @@ class SessionEncoder(nn.Module):
         )
         self.dropout = nn.Dropout(p=dropout)
 
+        # Projection from hidden space → embedding space for scoring.
+        # Required when hidden_dim != embed_dim; identity equivalent when equal.
+        if hidden_dim != embed_dim:
+            self.projection: nn.Module = nn.Linear(hidden_dim, embed_dim, bias=False)
+        else:
+            self.projection = nn.Identity()
+
         logger.debug(
-            "SessionEncoder: vocab=%d, embed=%d, hidden=%d, heads=%d",
+            "SessionEncoder: vocab=%d, embed=%d, hidden=%d, heads=%d, proj=%s",
             vocab_size,
             embed_dim,
             hidden_dim,
             num_heads,
+            "Linear" if hidden_dim != embed_dim else "Identity",
         )
 
     # ── Forward ───────────────────────────────────────────────────────────────
@@ -160,14 +169,11 @@ class SessionEncoder(nn.Module):
 
         Returns:
             FloatTensor [B, V] — unnormalised similarity scores.
-
-        Note:
-            When embed_dim == hidden_dim this is a direct dot product.
-            If dims differ, a linear projection layer should be added in
-            future iterations.
         """
-        # [B, H] x [H, V] → [B, V]
-        return torch.matmul(session_repr, item_embeddings.t())
+        # Project from hidden space → embedding space, then dot with embeddings.
+        # [B, H] → [B, D] → [B, V]
+        proj_repr = self.projection(session_repr)        # [B, D]
+        return torch.matmul(proj_repr, item_embeddings.t())  # [B, V]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -329,8 +335,7 @@ class NextItemTrainer:
             path:       File path for the checkpoint.
 
         Note:
-            Checkpoint naming convention:
-            ``checkpoints/epoch_{n:03d}_recall{val:.4f}.pt``
+            Checkpoint naming convention: epoch_NNN_recallX.XXXX.pt
         """
         ckpt_path = Path(path)
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)

@@ -75,7 +75,7 @@ def _print_epoch_summary(
 ) -> None:
     """Print a formatted epoch summary table row."""
     metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
-    best_marker = " ★" if is_best else ""
+    best_marker = " [*]" if is_best else ""   # ASCII-safe, no unicode star
     print(
         f"  Epoch {epoch+1:03d}/{num_epochs:03d}"
         f" | loss={train_loss:.4f}"

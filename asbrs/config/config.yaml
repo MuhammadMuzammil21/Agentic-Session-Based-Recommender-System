@@ -30,7 +30,7 @@ model:
 training:
   batch_size: 256
   lr: 0.001
-  weight_decay: 1e-5
+  weight_decay: 0.00001   # was 1e-5 — YAML parses bare 1e-5 as string in some parsers
   num_epochs: 20
   patience: 5
   checkpoint_dir: "checkpoints"

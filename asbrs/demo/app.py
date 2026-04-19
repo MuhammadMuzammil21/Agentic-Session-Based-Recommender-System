@@ -150,32 +150,44 @@ def _load_encoder(
     vocab_size: int,
     cfg: Config,
 ) -> SessionEncoder:
-    """Load SessionEncoder from checkpoint, inferring dims from state_dict.
+    """Load SessionEncoder from checkpoint, inferring all dims from state_dict.
 
-    Reads embed_dim and hidden_dim directly from the saved weight shapes to
-    avoid RuntimeError when the checkpoint was created with different hyper-
-    parameters than those currently in config.yaml.
+    Reads vocab_size, embed_dim, and hidden_dim directly from the saved weight
+    shapes so the loader is robust to changes in config.yaml and to checkpoints
+    built with different vocab sizes (e.g. synthetic smoke-test checkpoints).
 
     Args:
-        best_ckpt: Path to the .pt checkpoint file.
-        vocab_size: Total vocabulary size.
-        cfg: Config object (for num_attention_heads fallback).
+        best_ckpt:  Path to the .pt checkpoint file.
+        vocab_size: Current vocabulary size (used only as fallback assertion).
+        cfg:        Config object (for num_attention_heads fallback).
 
     Returns:
         SessionEncoder in eval mode with loaded weights.
+
+    Raises:
+        RuntimeError: If the checkpoint's vocab size does not match *vocab_size*.
     """
     payload = torch.load(best_ckpt, map_location="cpu", weights_only=True)
     sd = payload["model_state_dict"]
 
+    # Infer all architecture dimensions from the saved tensors.
+    ckpt_vocab_size: int = int(sd["item_embedding.embedding.weight"].shape[0])
     embed_dim: int = int(sd["item_embedding.embedding.weight"].shape[1])
     hidden_dim: int = int(sd["gru.weight_hh_l0"].shape[1])
+
+    if ckpt_vocab_size != vocab_size:
+        raise RuntimeError(
+            f"Checkpoint vocab size ({ckpt_vocab_size}) does not match "
+            f"current vocabulary ({vocab_size}). "
+            "Re-train or re-download the correct checkpoint."
+        )
 
     num_heads = cfg.model.num_attention_heads
     if hidden_dim % num_heads != 0:
         num_heads = 1
 
     encoder = SessionEncoder(
-        vocab_size=vocab_size,
+        vocab_size=ckpt_vocab_size,
         embed_dim=embed_dim,
         hidden_dim=hidden_dim,
         num_heads=num_heads,
@@ -185,8 +197,8 @@ def _load_encoder(
     encoder.load_state_dict(sd)
     encoder.eval()
     logger.info(
-        "SessionEncoder loaded: embed=%d hidden=%d heads=%d",
-        embed_dim, hidden_dim, num_heads,
+        "SessionEncoder loaded: vocab=%d embed=%d hidden=%d heads=%d",
+        ckpt_vocab_size, embed_dim, hidden_dim, num_heads,
     )
     return encoder
 

@@ -18,7 +18,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
 
 from agent.interfaces import IntentResult, RankedItem, RecommendationOutput
 from config.settings import Config
@@ -98,6 +100,31 @@ class AblationStudy:
                 counter[asin] += 1
         return counter
 
+    def _sessions_to_csr(self, sessions: List[List[int]], vocab_size: int) -> csr_matrix:
+        """Convert a list of integer-ID sessions into a (users x items) csr_matrix.
+
+        Each session becomes one row (pseudo-user); each item index gets value 1.
+
+        Args:
+            sessions:   List of sessions, each a list of integer item IDs.
+            vocab_size: Number of distinct items (number of columns).
+
+        Returns:
+            csr_matrix of shape (len(sessions), vocab_size).
+        """
+        rows, cols, data = [], [], []
+        for u_idx, session in enumerate(sessions):
+            for item_id in session:
+                if 0 <= item_id < vocab_size:
+                    rows.append(u_idx)
+                    cols.append(item_id)
+                    data.append(1.0)
+        return csr_matrix(
+            (data, (rows, cols)),
+            shape=(len(sessions), vocab_size),
+            dtype=np.float32,
+        )
+
     def _session_to_int_ids(self, session: List[str]) -> List[int]:
         """Convert a list of ASIN strings to Vocabulary integer indices.
 
@@ -164,19 +191,13 @@ class AblationStudy:
         logger.info("AblationStudy: running CF-only variant …")
         from retrieval.collaborative import ItemBasedCF
 
-        cf = ItemBasedCF(top_k=max(self._k_values))
         # Build interaction matrix from test sessions (excl. last item).
-        train_pairs: List[tuple[int, int]] = []
-        for session in self.test_sessions:
-            items_int = self._session_to_int_ids(session[:-1])
-            for item in items_int:
-                train_pairs.append((0, item))  # single synthetic user
-
-        # ItemBasedCF expects a list-of-lists (sessions).
         training_sessions = [
             self._session_to_int_ids(s[:-1]) for s in self.test_sessions
         ]
-        cf.fit(training_sessions)
+        cf = ItemBasedCF()  # top_k passed per-call to get_candidates()
+        interaction_matrix = self._sessions_to_csr(training_sessions, len(self.vocab))
+        cf.fit(interaction_matrix)
 
         max_k = max(self._k_values)
         predictions: List[tuple[List[int], int]] = []
@@ -239,7 +260,11 @@ class AblationStudy:
                     [min(len(session) - 1, max_len)], dtype=torch.long
                 )
 
-                _, scores = encoder(input_tensor, lengths)
+                session_repr, _attn, _hiddens = encoder(input_tensor, lengths)
+                scores = encoder.predict_scores(
+                    session_repr,
+                    encoder.item_embedding.embedding.weight,
+                )  # [1, V]
                 top_ids = scores[0].argsort(descending=True)[:max_k].tolist()
                 predictions.append((top_ids, gt))
 
@@ -290,8 +315,9 @@ class AblationStudy:
         training_sessions = [
             self._session_to_int_ids(s[:-1]) for s in self.test_sessions
         ]
-        cf = ItemBasedCF(top_k=ret_cfg.cf_top_k)
-        cf.fit(training_sessions)
+        cf = ItemBasedCF()  # top_k passed per-call to get_candidates()
+        interaction_matrix = self._sessions_to_csr(training_sessions, len(self.vocab))
+        cf.fit(interaction_matrix)
 
         cb = ContentBasedFilter(top_k=ret_cfg.content_top_k)
         cb.fit(self.item_metadata)
@@ -325,7 +351,8 @@ class AblationStudy:
                 lengths = torch.tensor(
                     [min(len(seed_int), max_len)], dtype=torch.long
                 )
-                _, _ = encoder(input_tensor, lengths)
+                session_repr, _attn, _hiddens = encoder(input_tensor, lengths)
+                # (session repr computed but not directly needed — hybrid retrieval used below)
 
                 # Retrieve hybrid candidates.
                 candidates = hybrid.retrieve(seed_int, max_k, self.vocab)
