@@ -11,7 +11,7 @@ Session-based recommender system for Amazon Electronics dataset.
 | Bootstrap | ✓ | |
 | 01 Data Pipeline | ✓ | 53/53 tests passing |
 | 02 Session Encoder | ✓ | 27/27 tests passing (99 total) |
-| 03 Retrieval | ☐ | |
+| 03 Retrieval | ✓ | 35/35 tests passing |
 | 04 Agentic Planner | ☐ | |
 | 05 Evaluation | ☐ | |
 | 06 Demo UI | ☐ | |
@@ -30,6 +30,9 @@ Session-based recommender system for Amazon Electronics dataset.
 - Attention: mean-pooled query, multi-head projection, masked softmax (PAD=-1e9)
 - Training: cross-entropy over full vocab (no negative sampling); gradient clipping at 1.0
 - Checkpoint naming: epoch_{n:03d}_recall{val:.4f}.pt; early stopping on Recall@10
+- CF: Item-based cosine similarity via sklearn (csr_matrix); aggregated column-sum scoring
+- CB: TF-IDF on (title + description + category); np.matrix → np.asarray fix for sklearn 1.6+
+- Hybrid: linear score fusion (cf_weight · cf_score + cb_weight · cb_score); items in only one source get 0 from the other; legacy stubs retained as CollaborativeRetriever/ContentBasedRetriever/_LegacyHybridRetriever
 
 ### Data Schema
 
