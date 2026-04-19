@@ -237,8 +237,7 @@ class TestAmazonDataLoader:
         ]
         fake_split = MagicMock()
         fake_split.take.return_value = iter(records)
-        fake_ds = {"full": fake_split}
-        return fake_ds
+        return fake_split  # load_dataset(split='train') returns the split directly
 
     def test_stream_reviews_returns_dataframe(self, cfg: Config) -> None:
         loader = AmazonDataLoader()

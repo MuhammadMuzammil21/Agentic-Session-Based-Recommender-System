@@ -2,6 +2,13 @@
 
 All raw data ingestion goes through AmazonDataLoader.stream_reviews().
 The full dataset is NEVER written to disk; only a subset is kept in RAM.
+
+HF dataset layout (as of 2025):
+  Reviews: hf://datasets/McAuley-Lab/Amazon-Reviews-2023/raw/review_categories/{Category}.jsonl
+  Metadata: hf://datasets/McAuley-Lab/Amazon-Reviews-2023/{config_name}/full-*.parquet
+
+The old loading-script approach (trust_remote_code=True) is no longer
+supported in datasets ≥3.0.  We load the raw JSONL files directly.
 """
 
 from __future__ import annotations
@@ -32,6 +39,18 @@ REVIEW_COLUMNS = [
 
 MIN_FREQ_DEFAULT: int = 5
 
+# The raw JSONL URL template.  {category_name} is e.g. "Electronics".
+_HF_REVIEW_URL = (
+    "hf://datasets/McAuley-Lab/Amazon-Reviews-2023"
+    "/raw/review_categories/{category_name}.jsonl"
+)
+
+# Map HF config name → plain category name in the JSONL path.
+# e.g. "raw_review_Electronics" → "Electronics"
+def _config_to_category(config_name: str) -> str:
+    """Strip the 'raw_review_' prefix to get the JSONL filename stem."""
+    return config_name.removeprefix("raw_review_").removeprefix("raw_meta_")
+
 
 class AmazonDataLoader:
     """Load Amazon Reviews 2023 via HuggingFace streaming.
@@ -39,7 +58,8 @@ class AmazonDataLoader:
     No data is downloaded to disk. Records are accumulated in memory up
     to `max_records` rows per call.
 
-    Example:
+    Example::
+
         loader = AmazonDataLoader()
         df = loader.stream_reviews(
             category="raw_review_Electronics",
@@ -54,14 +74,20 @@ class AmazonDataLoader:
         self,
         category: str,
         max_records: int,
-        cfg: Config,  # noqa: ARG002  (used for dataset name)
+        cfg: Config,  # noqa: ARG002  (kept for API compatibility)
     ) -> pd.DataFrame:
         """Stream review records from HuggingFace without a full download.
+
+        Loads the raw JSONL file directly via the ``hf://`` protocol so that
+        no dataset loading script is required (compatible with datasets ≥3.0).
+
+        The ``timestamp`` field in the source file is in **milliseconds**;
+        it is converted to seconds automatically.
 
         Args:
             category:    HF dataset config name, e.g. ``"raw_review_Electronics"``.
             max_records: Maximum number of rows to load into memory.
-            cfg:         Project config (used for HF dataset name).
+            cfg:         Project config (kept for API compatibility).
 
         Returns:
             DataFrame with columns: user_id, item_id, rating, timestamp,
@@ -70,36 +96,45 @@ class AmazonDataLoader:
         Raises:
             RuntimeError: If the HF streaming connection fails.
         """
+        category_name = _config_to_category(category)
+        url = _HF_REVIEW_URL.format(category_name=category_name)
+
         logger.info(
-            "Streaming up to %d records from HF dataset '%s' / '%s'",
+            "Streaming up to %d records from '%s'",
             max_records,
-            cfg.data.hf_dataset_name,
-            category,
+            url,
         )
 
         try:
             ds = load_dataset(
-                cfg.data.hf_dataset_name,
-                category,
+                "json",
+                data_files=url,
                 streaming=True,
-                trust_remote_code=True,
+                split="train",
             )
         except Exception as exc:
             logger.error("Failed to connect to HuggingFace: %s", exc)
             raise RuntimeError(f"HuggingFace streaming failed: {exc}") from exc
 
         records = []
-        for item in ds["full"].take(max_records):
+        for item in ds.take(max_records):
+            # timestamp is stored as a string of milliseconds in this dataset
+            try:
+                ts_ms = int(item.get("timestamp", 0))
+                ts_sec = ts_ms // 1000 if ts_ms > 2_000_000_000 else ts_ms
+            except (TypeError, ValueError):
+                ts_sec = 0
+
             records.append(
                 {
-                    "user_id": item["user_id"],
-                    "item_id": item["asin"],
-                    "rating": float(item["rating"]),
-                    "timestamp": int(item["timestamp"]),
-                    "title": item.get("title", ""),
+                    "user_id":     item.get("user_id", ""),
+                    "item_id":     item.get("asin", ""),
+                    "rating":      float(item.get("rating", 0.0)),
+                    "timestamp":   ts_sec,
+                    "title":       item.get("title", ""),
                     "description": item.get("text", ""),
-                    "price": item.get("price", None),
-                    "category": item.get("main_category", ""),
+                    "price":       item.get("price", None),
+                    "category":    item.get("main_category", category_name),
                 }
             )
 
