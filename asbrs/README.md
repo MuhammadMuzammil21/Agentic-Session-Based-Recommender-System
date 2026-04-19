@@ -1,138 +1,167 @@
 # Agentic Session-Based Recommender System (ASBRS)
 
-A session-based recommender system for the Amazon Electronics dataset, built with a 4-module agentic architecture.
+An end-to-end session-based recommender system for the Amazon Electronics dataset, combining a GRU + multi-head attention session encoder with a Gemini-powered agentic planner that infers purchase intent and re-ranks candidates for personalised, explainable recommendations.
 
 ## Architecture
 
 ```
-User Session
-    │
-    ▼
-┌─────────────────────────┐
-│  Memory Module           │  GRU + Multi-Head Attention
-│  (Session Encoder)       │  → session embedding
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│  Planning Module         │  Google Gemini 2.5 Flash LLM
-│  (Agentic Planner)       │  → intent classification + strategy
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│  Action Module           │  Collaborative + Content-Based
-│  (Hybrid Retrieval)      │  → candidate generation + reranking
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│  Explanation Module      │  Natural language rationale
-│  (Explainer)             │  → user-facing justification
-└─────────────────────────┘
+User Session  (ordered item interactions)
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  MODULE 01 · Data Pipeline              │
+│  AmazonDataLoader → SessionBuilder      │
+│  → Vocabulary → EncodedSession          │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│  MODULE 02 · Session Encoder (Memory)   │
+│  ItemEmbedding → PackedGRU              │
+│  → SelfAttentionLayer → session_repr    │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│  MODULE 03 · Hybrid Retrieval (Action)  │
+│  ItemBasedCF + ContentBasedFilter       │
+│  → HybridRetriever (score fusion)       │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│  MODULE 04 · Agentic Planner            │
+│  IntentPlanner (Gemini 2.5 Flash)       │
+│  → IntentReranker → RecommendationExp.  │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│  MODULE 05 · Evaluation                 │
+│  Recall@K · MRR@K · HitRate@K          │
+│  AblationStudy · HumanEvalExporter      │
+└─────────────────────────────────────────┘
+
+Flask Demo (Module 06) ties all modules together
 ```
 
-## Project Status
-Modules 01 through 05 (Data Pipeline, Session Encoder, Retrieval, Agentic Planner, and Evaluation) are completely implemented and integrated, with comprehensive test coverage.
+## Installation
 
-## Setup
+```bash
+# Clone / unzip the project
+git clone <repo_url>
+cd asbrs
 
-### 1. Create a virtual environment
-
-**Windows (PowerShell)**
-```powershell
+# Create a virtual environment
 python -m venv .venv
-```
 
-**macOS / Linux**
-```bash
-python3 -m venv .venv
-```
-
-### 2. Activate the virtual environment
-
-**Windows (PowerShell)**
-```powershell
+# Activate — Windows
 .venv\Scripts\Activate.ps1
-```
-
-> If you get an execution-policy error, run once:
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
-
-**Windows (Command Prompt)**
-```cmd
-.venv\Scripts\activate.bat
-```
-
-**macOS / Linux**
-```bash
+# Activate — macOS / Linux
 source .venv/bin/activate
-```
 
-Your prompt will show `(.venv)` when the environment is active.
-
-### 3. Install dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 4. Verify the installation
+### Environment variables
 
-```bash
-pytest tests/ -v
+Create a `.env` file (or export in your shell) with your Gemini API key:
+
+```
+GEMINI_API_KEY=your_key_here
 ```
 
-All tests should pass with no errors.
-
-### Deactivate
-
-```bash
-deactivate
-```
+Get a free key at <https://aistudio.google.com>.
 
 ## Quick Start
 
 ```bash
-# Download and preprocess data
+# 1. Download & preprocess the Amazon Electronics dataset
 python scripts/download_data.py
 
-# Train the session encoder
+# 2. Train the session encoder
 python scripts/train.py
 
-# Evaluate
+# 3. Evaluate all four model variants (ablation study)
 python scripts/evaluate.py
 
-# Launch demo
+# 4. Launch the interactive demo
 python demo/app.py
+#    → open http://localhost:5000 in your browser
+
+# (Optional) Run the end-to-end smoke test without real data
+python scripts/smoke_test.py
 ```
 
 ## Project Structure
 
 ```
 asbrs/
-├── config/          # Configuration files
-├── data/            # Data pipeline (loader, preprocessor, vocab)
-├── models/          # Neural model components (embeddings, attention, encoder)
-├── retrieval/       # Hybrid retrieval (CF + content-based)
-├── agent/           # Agentic planner, reranker, explainer
-├── evaluation/      # Metrics, ablation, human eval
-├── demo/            # Flask web demo
-├── scripts/         # Training and evaluation scripts
-├── tests/           # Unit and integration tests
-└── checkpoints/     # Saved model weights
+├── config/
+│   ├── config.yaml          # All hyperparameters and paths
+│   └── settings.py          # Typed Config dataclasses
+├── data/
+│   ├── interfaces.py        # Session, EncodedSession dataclasses
+│   ├── loader.py            # AmazonDataLoader (HuggingFace streaming)
+│   ├── preprocessor.py      # SessionBuilder, leave-one-out splitter
+│   └── vocab.py             # Vocabulary (ASIN ↔ int, PAD/UNK)
+├── models/
+│   ├── embeddings.py        # ItemEmbedding with Xavier init
+│   ├── attention.py         # SelfAttentionLayer (multi-head)
+│   └── encoder.py           # SessionEncoder + NextItemTrainer
+├── retrieval/
+│   ├── collaborative.py     # ItemBasedCF (cosine similarity / csr_matrix)
+│   ├── content_based.py     # ContentBasedFilter (TF-IDF)
+│   └── hybrid.py            # HybridRetriever (linear score fusion)
+├── agent/
+│   ├── interfaces.py        # IntentResult, RankedItem, RecommendationOutput
+│   ├── planner.py           # IntentPlanner (Gemini 2.5 Flash)
+│   ├── reranker.py          # IntentReranker (TF-IDF + intent cosine)
+│   └── explainer.py         # RecommendationExplainer (template-based)
+├── evaluation/
+│   ├── metrics.py           # recall_at_k, mrr_at_k, hit_rate_at_k, coverage
+│   ├── ablation.py          # AblationStudy (4 variants)
+│   └── human_eval.py        # HumanEvalExporter → portable HTML sheet
+├── demo/
+│   ├── app.py               # Flask web application
+│   ├── visualizer.py        # AttentionVisualizer (JSON payloads)
+│   └── templates/
+│       └── index.html       # Single-page vanilla JS UI
+├── scripts/
+│   ├── download_data.py     # Data download & preprocessing CLI
+│   ├── train.py             # Training CLI
+│   ├── evaluate.py          # Evaluation + ablation CLI
+│   └── smoke_test.py        # End-to-end integration smoke test
+├── tests/                   # pytest test suite (189 tests)
+├── checkpoints/             # Saved model weights
+├── requirements.txt
+└── README.md
 ```
 
-## Evaluation
+## Evaluation Results
 
-- **Protocol**: Leave-one-out
-- **Metrics**: Recall@K, MRR@K, HitRate@K for K ∈ {5, 10, 20}
-- **Dataset**: Amazon Reviews 2023, Electronics subset
-- **Ablation Study**: The `scripts/evaluate.py` script automatically pits the full model against 3 baselines:
-  - Popularity baseline
-  - CF-Only baseline
-  - GRU+Attention (No LLM) baseline
-- **Human Eval**: An HTML report is automatically generated at `evaluation/human_eval_sheet.html` to visualize recommendations and their LLM intent explanations using a clean, style-dependent UI.
+Results below are obtained via `scripts/evaluate.py` on the Amazon Electronics 2023 test set (leave-one-out protocol).
+
+| Model | Recall@5 | Recall@10 | Recall@20 | MRR@10 | HitRate@10 |
+|---|---|---|---|---|---|
+| Popularity Baseline | — | — | — | — | — |
+| CF Only | — | — | — | — | — |
+| GRU + Attention | — | — | — | — | — |
+| **Full Agentic (ASBRS)** | — | — | — | — | — |
+
+> **Note:** Run `python scripts/evaluate.py` after training on the full dataset to populate this table.
+
+## Team
+
+| Name | Student ID |
+|---|---|
+| Daaim Ali Shiekh | 22k-4363 |
+| Muhammad Muzammil | 22k-4267 |
+
+**Course:** CS-4053 Recommender Systems  
+**Institution:** NUCES-FAST  
+**Semester:** Spring 2026
 
 ## License
 

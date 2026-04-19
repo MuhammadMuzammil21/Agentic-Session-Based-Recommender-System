@@ -210,11 +210,11 @@ class AblationStudy:
         model_cfg = self.cfg.model
         encoder = SessionEncoder(
             vocab_size=vocab_size,
-            embedding_dim=model_cfg.embedding_dim,
+            embed_dim=model_cfg.embedding_dim,
             hidden_dim=model_cfg.hidden_dim,
             num_heads=model_cfg.num_attention_heads,
             dropout=model_cfg.dropout,
-            padding_idx=self.vocab.pad_idx,
+            padding_idx=0,
         )
         encoder.eval()
 
@@ -228,7 +228,7 @@ class AblationStudy:
                 gt = self._get_ground_truth(session)
 
                 # Left-pad / truncate to max_len.
-                pad_idx = self.vocab.pad_idx
+                pad_idx = 0
                 if len(seed) >= max_len:
                     seed = seed[-max_len:]
                 else:
@@ -279,11 +279,11 @@ class AblationStudy:
         vocab_size = len(self.vocab)
         encoder = SessionEncoder(
             vocab_size=vocab_size,
-            embedding_dim=model_cfg.embedding_dim,
+            embed_dim=model_cfg.embedding_dim,
             hidden_dim=model_cfg.hidden_dim,
             num_heads=model_cfg.num_attention_heads,
             dropout=model_cfg.dropout,
-            padding_idx=self.vocab.pad_idx,
+            padding_idx=0,
         )
         encoder.eval()
 
@@ -317,7 +317,7 @@ class AblationStudy:
                 gt = self._get_ground_truth(session)
 
                 # Encode session for intent inference.
-                pad_idx = self.vocab.pad_idx
+                pad_idx = 0
                 padded = seed_int[-max_len:] if len(seed_int) >= max_len else (
                     [pad_idx] * (max_len - len(seed_int)) + seed_int
                 )

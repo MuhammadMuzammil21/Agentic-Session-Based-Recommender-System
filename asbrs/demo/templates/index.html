@@ -3,86 +3,282 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ASBRS — Agentic Session-Based Recommender</title>
+  <title>ASBRS — Session-Based Recommender</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: "Inter", system-ui, sans-serif;
-      background: #0f0f1a;
-      color: #e2e8f0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f8fafc;
+      color: #1e293b;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      padding: 2rem 1rem;
     }
-    h1 { font-size: 2rem; font-weight: 700; color: #a78bfa; margin-bottom: .5rem; }
-    p.subtitle { color: #94a3b8; margin-bottom: 2rem; }
-    .card {
-      background: #1e1e2e;
-      border: 1px solid #2d2d42;
+    header {
+      background: #1F3864; /* Navy */
+      color: white;
+      padding: 1.5rem 2rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 { font-size: 1.5rem; font-weight: 700; margin: 0; }
+    header .team { font-size: 0.9rem; color: #93c5fd; /* Light blue accent */ }
+    
+    main {
+      display: grid;
+      grid-template-columns: 300px 1fr 300px;
+      gap: 2rem;
+      padding: 2rem;
+      max-width: 1400px;
+      margin: 0 auto;
+      flex: 1;
+      width: 100%;
+    }
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: white;
       border-radius: 12px;
       padding: 1.5rem;
-      width: 100%;
-      max-width: 720px;
-      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      border: 1px solid #e2e8f0;
+      display: flex;
+      flex-direction: column;
     }
-    label { display: block; font-size: .875rem; color: #94a3b8; margin-bottom: .5rem; }
+    .panel h2 {
+      font-size: 1.25rem;
+      color: #1F3864;
+      margin-bottom: 1rem;
+      font-weight: 600;
+      border-bottom: 2px solid #ebf8ff;
+      padding-bottom: 0.5rem;
+    }
+    
+    /* Left Panel: Session */
     textarea {
-      width: 100%; background: #12121f; border: 1px solid #333355;
-      border-radius: 8px; color: #e2e8f0; padding: .75rem;
-      font-size: .9rem; resize: vertical; min-height: 100px;
+      width: 100%;
+      height: 150px;
+      padding: 0.75rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      resize: vertical;
+      margin-bottom: 1rem;
     }
+    textarea:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }
+    
     button {
-      margin-top: 1rem; padding: .65rem 1.5rem;
-      background: linear-gradient(135deg, #7c3aed, #4f46e5);
-      color: #fff; border: none; border-radius: 8px;
-      font-size: 1rem; cursor: pointer; font-weight: 600;
-      transition: opacity .2s;
+      background: #1F3864;
+      color: white;
+      border: none;
+      padding: 0.75rem;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
     }
-    button:hover { opacity: .85; }
-    #results { display: none; }
-    .intent-badge {
-      display: inline-block; padding: .25rem .75rem;
-      background: #2d1f6e; border-radius: 20px;
-      font-size: .8rem; color: #a78bfa; margin-bottom: 1rem;
+    button:hover { background: #1e40af; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    
+    .example-btn {
+      background: #eff6ff;
+      color: #1e40af;
+      border: 1px solid #bfdbfe;
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+      text-align: left;
     }
-    .rec-list { list-style: none; }
-    .rec-list li {
-      padding: .75rem; border-radius: 8px;
-      background: #12121f; margin-bottom: .5rem;
-      border-left: 3px solid #7c3aed;
+    .example-btn:hover { background: #dbeafe; }
+    .examples-container { margin-top: 1.5rem; }
+    .examples-container h3 { font-size: 0.9rem; color: #64748b; margin-bottom: 0.5rem; }
+
+    /* Centre Panel: Recommendations */
+    #status {
+      text-align: center;
+      padding: 2rem;
+      color: #64748b;
+      display: none;
     }
-    .rec-title { font-weight: 600; color: #e2e8f0; }
-    .rec-exp { font-size: .82rem; color: #94a3b8; margin-top: .25rem; }
-    #status { color: #fbbf24; font-size: .9rem; margin-top: .5rem; }
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid #e2e8f0;
+      border-radius: 50%;
+      border-top-color: #3b82f6;
+      animation: spin 1s ease-in-out infinite;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .rec-card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+      border-left: 4px solid #3b82f6;
+    }
+    .rec-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem; }
+    .rec-title-wrap { display: flex; align-items: baseline; gap: 0.5rem; }
+    .rec-rank { font-weight: 700; color: #1F3864; font-size: 1.1rem; }
+    .rec-title { font-weight: 600; color: #334155; }
+    .rec-score { background: #f1f5f9; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.8rem; color: #475569; font-family: monospace; }
+    .rec-exp { font-size: 0.9rem; color: #64748b; line-height: 1.4; }
+    .rec-badge {
+      align-self: flex-start;
+      margin-top: 0.5rem;
+      background: #eff6ff;
+      color: #2563eb;
+      font-size: 0.75rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 12px;
+      font-weight: 500;
+      display: inline-block;
+    }
+
+    /* Right Panel: Attention & Intent */
+    .intent-pill {
+      background: #1F3864;
+      color: #93c5fd;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-weight: 500;
+      margin-bottom: 2rem;
+      line-height: 1.4;
+      border-left: 4px solid #3b82f6;
+    }
+    .chart-container {
+      margin-top: 1rem;
+    }
+    .bar-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 0.75rem;
+      font-size: 0.85rem;
+    }
+    .bar-label {
+      width: 40%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding-right: 0.5rem;
+      color: #475569;
+    }
+    .bar-track {
+      flex: 1;
+      height: 16px;
+      background: #e2e8f0;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    .bar-fill {
+      height: 100%;
+      background: #3b82f6;
+      width: 0%;
+      transition: width 0.5s ease-out;
+    }
+    .bar-val {
+      width: 15%;
+      text-align: right;
+      color: #64748b;
+      font-family: monospace;
+    }
+
+    #results-area, #right-panel-content { display: none; }
   </style>
 </head>
 <body>
-  <h1>⚡ ASBRS Demo</h1>
-  <p class="subtitle">Agentic Session-Based Recommender System · Amazon Electronics</p>
+  <header>
+    <h1>ASBRS — Session-Based Recommender</h1>
+    <div class="team">Team ASBRS</div>
+  </header>
 
-  <div class="card">
-    <label for="session-input">Enter item ASINs or titles (one per line)</label>
-    <textarea id="session-input" placeholder="B08N5LNQCX&#10;B07ZPKBL9V&#10;B09G3HRMVB"></textarea>
-    <button id="recommend-btn" onclick="getRecommendations()">Get Recommendations</button>
-    <div id="status"></div>
-  </div>
+  <main>
+    <!-- LEFT PANEL: Session Input -->
+    <section class="panel">
+      <h2>Your Session</h2>
+      <p style="font-size:0.85rem; color:#64748b; margin-bottom:0.5rem;">Enter item titles (one per line):</p>
+      <textarea id="session-input" placeholder="Wired Gaming Mouse&#10;Mechanical Keyboard Blue Switches&#10;Large Mouse Pad"></textarea>
+      <button id="recommend-btn" onclick="getRecommendations()">Get Recommendations</button>
 
-  <div class="card" id="results">
-    <div class="intent-badge" id="intent-badge">Intent: —</div>
-    <p id="rationale" style="color:#94a3b8; font-size:.875rem; margin-bottom:1rem;"></p>
-    <ul class="rec-list" id="rec-list"></ul>
-  </div>
+      {% if example_sessions %}
+      <div class="examples-container">
+        <h3>Example Sessions</h3>
+        {% for session in example_sessions %}
+        <button class="example-btn" onclick="loadExample(this)" data-items="{{ session | join('\n') | e }}">
+          Session {{ loop.index }} ({{ session|length }} items)
+        </button>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </section>
+
+    <!-- CENTRE PANEL: Recommendations -->
+    <section class="panel">
+      <h2>Recommendations</h2>
+      <div id="status"><div class="spinner"></div> Computing recommendations...</div>
+      
+      <div id="results-area">
+        <div id="rec-list">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Attention & Intent -->
+    <section class="panel">
+      <h2>Analysis</h2>
+      <div id="right-panel-content">
+        <h3 style="font-size:0.9rem; color:#64748b; margin-bottom:0.5rem;">Purchase Intent</h3>
+        <div class="intent-pill" id="intent-display"></div>
+
+        <h3 style="font-size:0.9rem; color:#64748b; margin-bottom:0.5rem;">Session Attention</h3>
+        <div class="chart-container" id="attention-chart">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+      <div id="right-panel-empty" style="color:#94a3b8; font-size:0.9rem; text-align:center; padding-top:2rem;">
+        Run a recommendation to see analysis.
+      </div>
+    </section>
+  </main>
 
   <script>
+    function loadExample(btn) {
+      const items = btn.getAttribute('data-items');
+      document.getElementById('session-input').value = items;
+    }
+
     async function getRecommendations() {
       const raw = document.getElementById("session-input").value.trim();
       const items = raw.split("\n").map(s => s.trim()).filter(Boolean);
-      if (!items.length) { alert("Please enter at least one item."); return; }
+      if (!items.length) {
+        alert("Please enter at least one item.");
+        return;
+      }
 
-      document.getElementById("status").textContent = "⏳ Computing recommendations…";
-      document.getElementById("results").style.display = "none";
+      const btn = document.getElementById("recommend-btn");
+      const status = document.getElementById("status");
+      const resultsArea = document.getElementById("results-area");
+      const rightPanel = document.getElementById("right-panel-content");
+      const rightPanelEmpty = document.getElementById("right-panel-empty");
+
+      btn.disabled = true;
+      status.style.display = "block";
+      resultsArea.style.display = "none";
+      rightPanel.style.display = "none";
+      rightPanelEmpty.style.display = "none";
 
       try {
         const res = await fetch("/recommend", {
@@ -90,30 +286,78 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_items: items }),
         });
+        
         const data = await res.json();
-        document.getElementById("status").textContent = "";
-        renderResults(data);
+        if (!res.ok) {
+          throw new Error(data.error || "Server error");
+        }
+        
+        renderRecommendations(data.recommendations);
+        renderAnalysis(data.intent, data.attention_heatmap);
+
+        status.style.display = "none";
+        resultsArea.style.display = "block";
+        rightPanel.style.display = "block";
       } catch (err) {
-        document.getElementById("status").textContent = "❌ Error: " + err.message;
+        status.innerHTML = `<span style="color:#ef4444">❌ Error: ${err.message}</span>`;
+      } finally {
+        btn.disabled = false;
       }
     }
 
-    function renderResults(data) {
-      document.getElementById("intent-badge").textContent = "Intent: " + (data.intent || "—");
-      document.getElementById("rationale").textContent = data.rationale || "";
-
+    function renderRecommendations(recs) {
       const list = document.getElementById("rec-list");
       list.innerHTML = "";
-      (data.recommendations || []).forEach((r, i) => {
-        const li = document.createElement("li");
-        li.innerHTML = `
-          <div class="rec-title">${i + 1}. ${r.title || r.item_idx}</div>
-          <div class="rec-exp">${r.explanation || ""}</div>
-        `;
-        list.appendChild(li);
-      });
+      
+      if (!recs || !recs.length) {
+        list.innerHTML = "<p>No recommendations found.</p>";
+        return;
+      }
 
-      document.getElementById("results").style.display = "block";
+      recs.forEach(r => {
+        const dom = document.createElement("div");
+        dom.className = "rec-card";
+        dom.innerHTML = `
+          <div class="rec-header">
+            <div class="rec-title-wrap">
+              <span class="rec-rank">#${r.rank}</span>
+              <span class="rec-title">${r.title}</span>
+            </div>
+            <span class="rec-score">${r.score}</span>
+          </div>
+          <div class="rec-exp">${r.explanation}</div>
+          <div class="rec-badge">${r.intent_badge || 'Recommendation'}</div>
+        `;
+        list.appendChild(dom);
+      });
+    }
+
+    function renderAnalysis(intent, heatmap) {
+      document.getElementById("intent-display").textContent = intent || "Unknown Intent";
+
+      const chart = document.getElementById("attention-chart");
+      chart.innerHTML = "";
+
+      if (heatmap && heatmap.labels && heatmap.values) {
+        const labels = heatmap.labels;
+        const vals = heatmap.values;
+        
+        labels.forEach((lbl, i) => {
+          const val = vals[i];
+          const pct = Math.round(val * 100);
+          
+          const row = document.createElement("div");
+          row.className = "bar-row";
+          row.innerHTML = `
+            <div class="bar-label" title="${lbl}">${lbl}</div>
+            <div class="bar-track">
+              <div class="bar-fill" style="width: ${pct}%"></div>
+            </div>
+            <div class="bar-val">${pct}%</div>
+          `;
+          chart.appendChild(row);
+        });
+      }
     }
   </script>
 </body>

@@ -1,36 +1,67 @@
-"""
-visualizer.py — Utilities to build chart data for the demo frontend.
+"""demo/visualizer.py — Utilities to format model outputs for the demo frontend.
 
 Converts model outputs into JSON-serialisable chart payloads used by
 the index.html template.
-
-Implemented in Module 06.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
-
-def build_score_chart(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Build a Chart.js-compatible bar chart payload for recommendation scores.
-
-    Args:
-        recommendations: list of {title, final_score, cf_score, cb_score}
-    Returns:
-        {labels: [...], datasets: [...]}
-    """
-    raise NotImplementedError("Implemented in Module 06")
+from agent.interfaces import RecommendationOutput
 
 
-def build_session_timeline(session_items: List[str]) -> List[Dict[str, str]]:
-    """
-    Build a simple timeline payload for the session history panel.
+class AttentionVisualizer:
+    """Prepares attention data and recommendations for JSON serialization."""
 
-    Args:
-        session_items: ordered list of item titles
-    Returns:
-        List of {step, title} dicts
-    """
-    return [{"step": i + 1, "title": title} for i, title in enumerate(session_items)]
+    @staticmethod
+    def heatmap_data(session_items: List[str], attn_weights: List[float]) -> Dict[str, Any]:
+        """Convert raw attention weights into a normalized heatmap payload.
+
+        Args:
+            session_items: Ordered list of item titles in the session.
+            attn_weights: List of raw attention weights for each item.
+
+        Returns:
+            Dictionary with 'labels' and 'values' (normalized to sum to 1.0).
+        """
+        # Ensure lengths match up to available weights
+        n = min(len(session_items), len(attn_weights))
+        items = session_items[-n:] if n > 0 else []
+        weights = attn_weights[-n:] if n > 0 else []
+
+        total = sum(weights)
+        if total > 0:
+            norm_weights = [w / total for w in weights]
+        else:
+            norm_weights = [0.0] * n
+
+        return {
+            "labels": items,
+            "values": norm_weights
+        }
+
+    @staticmethod
+    def recommendation_cards(outputs: List[RecommendationOutput]) -> List[Dict[str, Any]]:
+        """Format recommendation outputs for the frontend template.
+
+        Args:
+            outputs: List of RecommendationOutput objects.
+
+        Returns:
+            List of dictionaries for rendering in the DOM.
+        """
+        cards = []
+        for out in outputs:
+            title = out.item_title
+            if len(title) > 60:
+                title = title[:57] + "..."
+            
+            cards.append({
+                "rank": out.rank,
+                "title": title,
+                "score": f"{out.final_score:.2f}",
+                "explanation": out.explanation,
+                "intent_badge": "intent_match"
+            })
+        return cards
