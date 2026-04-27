@@ -155,8 +155,12 @@ def _sample_example_sessions(
     asin_to_title: Dict[str, str],
     n: int = 5,
     seed: int = 42,
-) -> List[List[str]]:
-    """Sample n sessions from test set and convert ASINs to titles.
+) -> List[Dict[str, Any]]:
+    """Sample n sessions from test set with held-out targets for verification.
+
+    Each example carries both the *input* (items[:-1]) and the *target*
+    (the leave-one-out held-out item) so the demo can show "actual next item"
+    next to predictions.
 
     Args:
         test_sessions: Session objects or plain lists.
@@ -165,16 +169,20 @@ def _sample_example_sessions(
         seed: Random seed for reproducibility.
 
     Returns:
-        List of n session-title lists (each ≥3 items excluding target).
+        List of dicts: {"input": [titles...], "target": title_str}.
     """
     random.seed(seed)
-    valid: List[List[str]] = []
+    valid: List[Dict[str, Any]] = []
     for s in test_sessions:
         item_strs = s.item_ids if hasattr(s, "item_ids") else list(s)
-        seed_asins = item_strs[:-1]  # exclude held-out target
-        if len(seed_asins) >= 3:
-            titles = [asin_to_title.get(a, a) for a in seed_asins]
-            valid.append(titles)
+        if len(item_strs) < 4:  # need ≥3 inputs + 1 target
+            continue
+        seed_asins = item_strs[:-1]
+        target_asin = item_strs[-1]
+        valid.append({
+            "input": [asin_to_title.get(a, a) for a in seed_asins],
+            "target": asin_to_title.get(target_asin, target_asin),
+        })
 
     return random.sample(valid, min(n, len(valid)))
 
@@ -332,6 +340,10 @@ def recommend():
 
             top_k = max(cfg.evaluation.k_values)
             top_scores, top_ids = torch.topk(scores, k=top_k)
+            # Convert raw dot-product scores into a softmax probability over
+            # just the top-K, so the UI can show interpretable percentages
+            # like "28% confidence" instead of unbounded numbers like "2.99".
+            top_probs = torch.softmax(top_scores, dim=0)
 
         attn_weights_all: List[float] = attn_weights_batch[0].tolist()
         valid_attn = attn_weights_all[-true_len:]
@@ -339,19 +351,22 @@ def recommend():
 
         # Step 4 — build RecommendationOutput objects from top-K.
         outputs: List[RecommendationOutput] = []
-        for rank_idx, (item_id, score) in enumerate(
-            zip(top_ids.tolist(), top_scores.tolist())
+        for rank_idx, (item_id, score, prob) in enumerate(
+            zip(top_ids.tolist(), top_scores.tolist(), top_probs.tolist())
         ):
             asin = vocab.decode(item_id)
             title = asin_to_title.get(asin, asin) or asin
+            # final_score = softmax probability within top-K (sums to 1.0).
             outputs.append(
                 RecommendationOutput(
                     rank=rank_idx + 1,
                     item_id=item_id,
                     item_title=title,
-                    final_score=float(score),
+                    final_score=float(prob),
                     explanation=(
-                        "Top-ranked by GRU+Attention score for your session."
+                        f"Raw GRU+Attention score: {score:+.2f}. "
+                        f"This is the model's relative preference for this item "
+                        f"versus the other top candidates."
                     ),
                 )
             )

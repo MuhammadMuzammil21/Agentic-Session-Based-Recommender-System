@@ -214,10 +214,20 @@
 
       {% if example_sessions %}
       <div class="examples-container">
-        <h3>Example Sessions</h3>
+        <h3>Example Sessions (from test set)</h3>
+        <p style="font-size:0.75rem; color:#94a3b8; margin-bottom:0.5rem;">
+          Each session has a held-out next item — clicking loads the inputs and
+          shows you what the model should ideally predict.
+        </p>
         {% for session in example_sessions %}
-        <button class="example-btn" onclick="loadExample(this)" data-items="{{ session | join('\n') | e }}">
-          Session {{ loop.index }} ({{ session|length }} items)
+        <button class="example-btn"
+                onclick="loadExample(this)"
+                data-items="{{ session.input | join('\n') | e }}"
+                data-target="{{ session.target | e }}">
+          <div>Session {{ loop.index }} ({{ session.input|length }} items)</div>
+          <div style="font-size:0.7rem; color:#64748b; margin-top:0.25rem;">
+            Actual next: <em>{{ session.target[:60] }}{% if session.target|length > 60 %}…{% endif %}</em>
+          </div>
         </button>
         {% endfor %}
       </div>
@@ -228,7 +238,9 @@
     <section class="panel">
       <h2>Recommendations</h2>
       <div id="status"><div class="spinner"></div> Computing recommendations...</div>
-      
+
+      <div id="actual-banner" style="display:none; padding:0.75rem 1rem; border-radius:8px; margin-bottom:1rem; font-size:0.9rem;"></div>
+
       <div id="results-area">
         <div id="rec-list">
           <!-- Populated by JS -->
@@ -236,14 +248,18 @@
       </div>
     </section>
 
-    <!-- RIGHT PANEL: Attention & Intent -->
+    <!-- RIGHT PANEL: Attention -->
     <section class="panel">
       <h2>Analysis</h2>
       <div id="right-panel-content">
-        <h3 style="font-size:0.9rem; color:#64748b; margin-bottom:0.5rem;">Purchase Intent</h3>
+        <h3 style="font-size:0.9rem; color:#64748b; margin-bottom:0.5rem;">Recommendation Method</h3>
         <div class="intent-pill" id="intent-display"></div>
 
         <h3 style="font-size:0.9rem; color:#64748b; margin-bottom:0.5rem;">Session Attention</h3>
+        <p style="font-size:0.75rem; color:#94a3b8; margin-bottom:0.75rem;">
+          How much each input item influenced the model's prediction.
+          Equal % means the model didn't differentiate strongly between them.
+        </p>
         <div class="chart-container" id="attention-chart">
           <!-- Populated by JS -->
         </div>
@@ -255,10 +271,22 @@
   </main>
 
   <script>
+    // Holds the held-out target for the most-recently selected example
+    // session. Cleared when the user types a custom session.
+    let currentTarget = null;
+
     function loadExample(btn) {
       const items = btn.getAttribute('data-items');
+      const target = btn.getAttribute('data-target');
       document.getElementById('session-input').value = items;
+      currentTarget = target || null;
     }
+
+    document.getElementById('session-input').addEventListener('input', () => {
+      // User edited the textarea — drop the example target since it no
+      // longer corresponds to the typed-in items.
+      currentTarget = null;
+    });
 
     async function getRecommendations() {
       const raw = document.getElementById("session-input").value.trim();
@@ -292,7 +320,8 @@
           throw new Error(data.error || "Server error");
         }
         
-        renderRecommendations(data.recommendations);
+        renderActualBanner(currentTarget, data.recommendations);
+        renderRecommendations(data.recommendations, currentTarget);
         renderAnalysis(data.intent, data.attention_heatmap);
 
         status.style.display = "none";
@@ -305,28 +334,67 @@
       }
     }
 
-    function renderRecommendations(recs) {
+    function renderActualBanner(target, recs) {
+      const banner = document.getElementById("actual-banner");
+      if (!target) {
+        banner.style.display = "none";
+        return;
+      }
+      // Determine the rank (1-based) at which the actual item appears, if any.
+      const matchIdx = (recs || []).findIndex(
+        r => r.title.trim() === target.trim()
+      );
+      banner.style.display = "block";
+      if (matchIdx >= 0) {
+        banner.style.background = "#dcfce7";
+        banner.style.color = "#166534";
+        banner.style.border = "1px solid #86efac";
+        banner.innerHTML =
+          `✓ <strong>Hit at rank #${matchIdx + 1}</strong> — actual next: ` +
+          `<em>${escapeHtml(target)}</em>`;
+      } else {
+        banner.style.background = "#fef3c7";
+        banner.style.color = "#92400e";
+        banner.style.border = "1px solid #fcd34d";
+        banner.innerHTML =
+          `✗ Not in top-${(recs || []).length} — actual next: ` +
+          `<em>${escapeHtml(target)}</em>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    function renderRecommendations(recs, target) {
       const list = document.getElementById("rec-list");
       list.innerHTML = "";
-      
+
       if (!recs || !recs.length) {
         list.innerHTML = "<p>No recommendations found.</p>";
         return;
       }
 
       recs.forEach(r => {
+        const isMatch = target && r.title.trim() === target.trim();
         const dom = document.createElement("div");
         dom.className = "rec-card";
+        if (isMatch) {
+          dom.style.borderLeft = "4px solid #16a34a";
+          dom.style.background = "#f0fdf4";
+        }
         dom.innerHTML = `
           <div class="rec-header">
             <div class="rec-title-wrap">
               <span class="rec-rank">#${r.rank}</span>
-              <span class="rec-title">${r.title}</span>
+              <span class="rec-title">${escapeHtml(r.title)}</span>
+              ${isMatch ? '<span style="color:#16a34a; font-weight:700; margin-left:0.5rem;">✓ MATCH</span>' : ''}
             </div>
             <span class="rec-score">${r.score}</span>
           </div>
-          <div class="rec-exp">${r.explanation}</div>
-          <div class="rec-badge">${r.intent_badge || 'Recommendation'}</div>
+          <div class="rec-exp">${escapeHtml(r.explanation)}</div>
         `;
         list.appendChild(dom);
       });

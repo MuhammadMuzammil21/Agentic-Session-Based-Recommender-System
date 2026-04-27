@@ -60,7 +60,8 @@ class AttentionVisualizer:
             cards.append({
                 "rank": out.rank,
                 "title": title,
-                "score": f"{out.final_score:.2f}",
+                # Probability within top-K: render as percentage.
+                "score": f"{out.final_score * 100:.1f}%",
                 "explanation": out.explanation,
                 "intent_badge": "intent_match"
             })
