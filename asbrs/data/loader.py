@@ -13,6 +13,7 @@ supported in datasets ≥3.0.  We load the raw JSONL files directly.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 REVIEW_COLUMNS = [
     "user_id",
     "item_id",
+    "parent_asin",
     "rating",
     "timestamp",
     "title",
@@ -44,6 +46,18 @@ _HF_REVIEW_URL = (
     "hf://datasets/McAuley-Lab/Amazon-Reviews-2023"
     "/raw/review_categories/{category_name}.jsonl"
 )
+
+# Item-metadata JSONL template.  Same dataset, different folder.
+_HF_META_URL = (
+    "hf://datasets/McAuley-Lab/Amazon-Reviews-2023"
+    "/raw/meta_categories/meta_{category_name}.jsonl"
+)
+
+# Cap on metadata records scanned when looking up titles for a given vocabulary.
+_META_SCAN_CAP: int = 2_000_000
+
+# Truncate description text to this many chars to keep RAM bounded.
+_DESC_MAX_CHARS: int = 1000
 
 # Map HF config name → plain category name in the JSONL path.
 # e.g. "raw_review_Electronics" → "Electronics"
@@ -129,6 +143,10 @@ class AmazonDataLoader:
                 {
                     "user_id":     item.get("user_id", ""),
                     "item_id":     item.get("asin", ""),
+                    # parent_asin is the umbrella product (multiple child asin
+                    # variants share one parent_asin); needed to join with the
+                    # metadata file which is keyed by parent_asin.
+                    "parent_asin": item.get("parent_asin", "") or item.get("asin", ""),
                     "rating":      float(item.get("rating", 0.0)),
                     "timestamp":   ts_sec,
                     "title":       item.get("title", ""),
@@ -143,6 +161,108 @@ class AmazonDataLoader:
             "Streaming complete — shape=%s, dtypes:\n%s",
             df.shape,
             df.dtypes.to_string(),
+        )
+        return df
+
+    def stream_item_metadata(
+        self,
+        category: str,
+        target_asins: set[str],
+        max_scanned: int = _META_SCAN_CAP,
+    ) -> pd.DataFrame:
+        """Stream product-metadata JSONL and keep only records for target_asins.
+
+        Joins on the metadata's ``parent_asin`` field (which the reviews dataset
+        uses as ``asin``). Stops early once every target asin has been found.
+
+        Args:
+            category:     HF metadata config name, e.g. ``"raw_meta_Electronics"``.
+            target_asins: Set of ASIN strings whose product info we need.
+            max_scanned:  Hard cap on records iterated (safety net for huge files).
+
+        Returns:
+            DataFrame with columns: item_id, title, description, category, price.
+            Items in *target_asins* with no metadata in the file are simply absent.
+
+        Raises:
+            RuntimeError: If the HF streaming connection fails.
+        """
+        category_name = _config_to_category(category)
+        url = _HF_META_URL.format(category_name=category_name)
+
+        logger.info(
+            "Streaming item metadata for %d target ASINs from '%s'",
+            len(target_asins),
+            url,
+        )
+
+        # Use the "text" loader (one JSON line per row) and parse manually,
+        # bypassing pyarrow schema inference which trips on heterogeneous
+        # records (some fields are None vs structs across rows).
+        try:
+            ds = load_dataset(
+                "text",
+                data_files=url,
+                streaming=True,
+                split="train",
+            )
+        except Exception as exc:
+            logger.error("Failed to connect to HuggingFace metadata: %s", exc)
+            raise RuntimeError(f"HuggingFace metadata streaming failed: {exc}") from exc
+
+        records: list[dict] = []
+        found: set[str] = set()
+        target_set = set(target_asins)
+
+        for i, row in enumerate(ds.take(max_scanned)):
+            if i and i % 50_000 == 0:
+                logger.info(
+                    "metadata scan: %d records seen, %d/%d ASINs matched",
+                    i,
+                    len(found),
+                    len(target_set),
+                )
+
+            try:
+                item = json.loads(row["text"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            parent_asin = str(item.get("parent_asin", "") or "")
+            if not parent_asin or parent_asin not in target_set or parent_asin in found:
+                continue
+
+            description = item.get("description", []) or []
+            if isinstance(description, list):
+                description = " ".join(str(d) for d in description if d)
+            description = str(description)[:_DESC_MAX_CHARS]
+
+            records.append(
+                {
+                    "item_id":     parent_asin,
+                    "title":       str(item.get("title", "") or ""),
+                    "description": description,
+                    "category":    str(item.get("main_category", category_name) or category_name),
+                    "price":       item.get("price", None),
+                }
+            )
+            found.add(parent_asin)
+
+            if len(found) >= len(target_set):
+                logger.info(
+                    "metadata scan complete: all %d target ASINs found at record %d",
+                    len(target_set),
+                    i + 1,
+                )
+                break
+
+        df = pd.DataFrame(records, columns=["item_id", "title", "description", "category", "price"])
+        missing = len(target_set) - len(found)
+        logger.info(
+            "Item metadata: %d/%d ASINs joined (%d missing — will fall back to ASIN string)",
+            len(found),
+            len(target_set),
+            missing,
         )
         return df
 

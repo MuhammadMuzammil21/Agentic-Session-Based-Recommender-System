@@ -18,24 +18,16 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from flask import Flask, jsonify, render_template, request
-import numpy as np
-import pandas as pd
 import torch
-from scipy.sparse import csr_matrix
 
 # Ensure package root is importable when running `python demo/app.py`
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.explainer import RecommendationExplainer
-from agent.interfaces import IntentResult
-from agent.reranker import IntentReranker
+from agent.interfaces import RecommendationOutput
 from config.settings import Config
-from data.vocab import Vocabulary
+from data.vocab import PAD_IDX, UNK_IDX, Vocabulary
 from demo.visualizer import AttentionVisualizer
 from models.encoder import SessionEncoder
-from retrieval.collaborative import ItemBasedCF
-from retrieval.content_based import ContentBasedFilter
-from retrieval.hybrid import HybridRetriever
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -57,9 +49,6 @@ _cache: Dict[str, Any] = {
     "title_to_asin": None,
     "asin_to_title": None,
     "encoder": None,
-    "hybrid": None,
-    "reranker": None,
-    "explainer": None,
     "example_sessions": None,
 }
 
@@ -101,47 +90,6 @@ def _load_item_metadata(processed_dir: Path) -> pd.DataFrame:
         f"No item metadata found in {processed_dir} "
         "(expected item_metadata.pkl or item_metadata.csv)"
     )
-
-
-def _build_cf_interaction_matrix(
-    train_sessions: List[Any],
-    vocab: Vocabulary,
-) -> csr_matrix:
-    """Build a (1 × num_items) sparse interaction matrix from training sessions.
-
-    All session items mapped to a single synthetic user so that CF can compute
-    item–item co-occurrence similarity.
-
-    Args:
-        train_sessions: Session objects or plain list-of-ASIN-strings.
-        vocab: Fitted Vocabulary.
-
-    Returns:
-        csr_matrix of shape (1, vocab_size).
-    """
-    vocab_size = len(vocab)
-    row_indices: List[int] = []
-    col_indices: List[int] = []
-
-    for s in train_sessions:
-        item_strs = s.item_ids if hasattr(s, "item_ids") else list(s)
-        # Exclude the last item (leave-one-out held-out target).
-        for asin in item_strs[:-1]:
-            idx = vocab.encode(asin)
-            row_indices.append(0)
-            col_indices.append(idx)
-
-    if not row_indices:
-        # Fallback: empty 1-row matrix.
-        return csr_matrix((1, vocab_size), dtype=np.float32)
-
-    data = np.ones(len(row_indices), dtype=np.float32)
-    matrix = csr_matrix(
-        (data, (row_indices, col_indices)),
-        shape=(1, vocab_size),
-        dtype=np.float32,
-    )
-    return matrix
 
 
 def _load_encoder(
@@ -272,28 +220,6 @@ def load_components() -> None:
     best_ckpt = max(pts, key=lambda p: p.name)
     _cache["encoder"] = _load_encoder(best_ckpt, len(vocab), cfg)
 
-    # ── Retrievers ────────────────────────────────────────────────────────────
-    train_path = processed_dir / "train_sessions.pkl"
-    if not train_path.exists():
-        raise FileNotFoundError(f"train_sessions.pkl not found in {processed_dir}")
-    with train_path.open("rb") as fh:
-        train_sessions = pickle.load(fh)
-
-    interaction_matrix = _build_cf_interaction_matrix(train_sessions, vocab)
-    cf = ItemBasedCF()
-    cf.fit(interaction_matrix)
-
-    cb = ContentBasedFilter()
-    cb.fit(df)
-
-    _cache["hybrid"] = HybridRetriever(cf=cf, cb=cb)
-
-    # ── Agent modules ─────────────────────────────────────────────────────────
-    reranker = IntentReranker()
-    reranker.fit(df)
-    _cache["reranker"] = reranker
-    _cache["explainer"] = RecommendationExplainer()
-
     # ── Example sessions ──────────────────────────────────────────────────────
     test_path = processed_dir / "test_sessions.pkl"
     if test_path.exists():
@@ -366,10 +292,6 @@ def recommend():
         cfg: Config = _cache["cfg"]
         vocab: Vocabulary = _cache["vocab"]
         encoder: SessionEncoder = _cache["encoder"]
-        hybrid: HybridRetriever = _cache["hybrid"]
-        reranker: IntentReranker = _cache["reranker"]
-        explainer: RecommendationExplainer = _cache["explainer"]
-        item_metadata: pd.DataFrame = _cache["item_metadata"]
         title_to_asin: Dict[str, str] = _cache["title_to_asin"]
         asin_to_title: Dict[str, str] = _cache["asin_to_title"]
 
@@ -381,7 +303,6 @@ def recommend():
 
         # Step 2 — run SessionEncoder.forward()
         max_len = cfg.model.max_seq_len
-        PAD_IDX = 0
         if len(seed_int) >= max_len:
             padded = seed_int[-max_len:]
             true_len = max_len
@@ -393,45 +314,49 @@ def recommend():
         lengths_tensor = torch.tensor([true_len], dtype=torch.long)
 
         with torch.no_grad():
-            _, attn_weights_batch, _ = encoder(input_tensor, lengths_tensor)
+            session_repr, attn_weights_batch, _ = encoder(
+                input_tensor, lengths_tensor
+            )
+
+            # Step 3 — score every item with the trained encoder, take top-K.
+            scores = encoder.predict_scores(
+                session_repr, encoder.item_embedding.embedding.weight
+            )[0]
+            scores[PAD_IDX] = float("-inf")
+            scores[UNK_IDX] = float("-inf")
+            # Mask items already in the user's session — recommending an item
+            # they just clicked is uninteresting in a demo.
+            for sid in seed_int:
+                if 0 <= sid < scores.shape[0]:
+                    scores[sid] = float("-inf")
+
+            top_k = max(cfg.evaluation.k_values)
+            top_scores, top_ids = torch.topk(scores, k=top_k)
 
         attn_weights_all: List[float] = attn_weights_batch[0].tolist()
-        # Attention covers the full padded window; take only real-token part
         valid_attn = attn_weights_all[-true_len:]
         valid_titles = session_titles[-true_len:]
 
-        # Step 3 — run HybridRetriever.retrieve()
-        max_k = max(cfg.evaluation.k_values)
-        candidates = hybrid.retrieve(seed_int, max_k, vocab)
+        # Step 4 — build RecommendationOutput objects from top-K.
+        outputs: List[RecommendationOutput] = []
+        for rank_idx, (item_id, score) in enumerate(
+            zip(top_ids.tolist(), top_scores.tolist())
+        ):
+            asin = vocab.decode(item_id)
+            title = asin_to_title.get(asin, asin) or asin
+            outputs.append(
+                RecommendationOutput(
+                    rank=rank_idx + 1,
+                    item_id=item_id,
+                    item_title=title,
+                    final_score=float(score),
+                    explanation=(
+                        "Top-ranked by GRU+Attention score for your session."
+                    ),
+                )
+            )
 
-        # Step 4 — build a session-derived intent (no LLM).
-        # The reranker uses TF-IDF, so concatenated session titles work as
-        # the "intent text" — items textually similar to recent clicks
-        # are favoured.
-        intent = IntentResult(
-            intent_summary=" ".join(session_titles),
-            top_items=session_titles[:3],
-            confidence=1.0,
-            keywords=[],
-        )
-
-        # Step 5 — run IntentReranker.rerank()
-        ranked = reranker.rerank(candidates, intent, vocab, item_metadata, max_k)
-
-        # Step 6 — run RecommendationExplainer.format_recommendations()
-        # Sort valid_titles/attn by weight descending (explainer expects this order)
-        paired = sorted(zip(valid_attn, valid_titles), reverse=True)
-        sorted_attn  = [w for w, _ in paired]
-        sorted_titles = [t for _, t in paired]
-
-        outputs = explainer.format_recommendations(
-            ranked_items=ranked,
-            session_items=sorted_titles,
-            attn_weights=sorted_attn,
-            intent=intent,
-        )
-
-        # Step 7 — serialise and return
+        # Step 5 — serialise and return
         cards = AttentionVisualizer.recommendation_cards(outputs)
         heatmap = AttentionVisualizer.heatmap_data(valid_titles, valid_attn)
 
@@ -441,7 +366,7 @@ def recommend():
         return jsonify({
             "recommendations": cards,
             "attention_heatmap": heatmap,
-            "intent": intent.intent_summary,
+            "intent": "GRU + Attention scoring (no intent layer)",
         })
 
     except ValueError as exc:

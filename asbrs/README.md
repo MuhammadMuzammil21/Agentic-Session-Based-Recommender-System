@@ -1,6 +1,6 @@
 # Agentic Session-Based Recommender System (ASBRS)
 
-An end-to-end session-based recommender system for the Amazon Electronics dataset, combining a GRU + multi-head attention session encoder with a Gemini-powered agentic planner that infers purchase intent and re-ranks candidates for personalised, explainable recommendations.
+An end-to-end session-based recommender system for the Amazon Electronics dataset, combining a GRU + multi-head attention session encoder that infers purchase intent and re-ranks candidates for personalised, explainable recommendations.
 
 ## Architecture
 
