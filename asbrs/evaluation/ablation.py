@@ -1,11 +1,10 @@
 """evaluation/ablation.py — Ablation study runner for ASBRS.
 
-Compares four model configurations against each other:
+Compares three model configurations against each other:
 
 1. Popularity baseline  — globally most-popular items, no session signal.
 2. CF-only              — ItemBasedCF retrieval, no re-ranking.
-3. GRU + Attention      — full SessionEncoder, but no LLM intent re-ranking.
-4. Full Agentic (ASBRS) — complete pipeline including LLM planner & reranker.
+3. GRU + Attention      — full SessionEncoder.
 
 Each variant is evaluated with evaluate_model() on the same test sessions,
 and results are aggregated into a comparison DataFrame.
@@ -22,7 +21,6 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from agent.interfaces import IntentResult, RankedItem, RecommendationOutput
 from config.settings import Config
 from data.vocab import Vocabulary
 from evaluation.metrics import evaluate_model
@@ -61,8 +59,6 @@ class AblationStudy:
         item_metadata: pd.DataFrame,
         cfg: Config,
         checkpoint_path: Optional[Path] = None,
-        agentic_n_samples: int = 50,
-        agentic_call_delay: float = 6.5,
     ) -> None:
         """Initialise the ablation runner.
 
@@ -74,26 +70,15 @@ class AblationStudy:
             item_metadata:   DataFrame with columns ``item_id`` and ``title``.
             cfg:             Loaded Config object.
             checkpoint_path: Optional path to a trained SessionEncoder
-                checkpoint (.pt). Used by GRU+Attention and Full Agentic
-                variants. If None or missing, those variants run with
-                random weights.
+                checkpoint (.pt). Used by the GRU+Attention variant.
+                If None or missing, it runs with random weights.
         """
         self.test_sessions = test_sessions
         self.vocab = vocab
         self.item_metadata = item_metadata
         self.cfg = cfg
         self.checkpoint_path = checkpoint_path
-        self.agentic_n_samples = agentic_n_samples
-        self.agentic_call_delay = agentic_call_delay
         self._k_values: List[int] = cfg.evaluation.k_values
-
-        # Lazy-initialised components (built on first use to avoid heavy
-        # imports at module level when only some variants are needed).
-        self._cf: Optional[object] = None
-        self._cb: Optional[object] = None
-        self._hybrid: Optional[object] = None
-        self._encoder: Optional[object] = None
-        self._reranker: Optional[object] = None
 
     # ── Internal setup ────────────────────────────────────────────────────────
 
@@ -301,142 +286,10 @@ class AblationStudy:
 
         return evaluate_model(predictions, self._k_values)
 
-    # ── Variant 4: Full Agentic (ASBRS) ──────────────────────────────────────
-
-    def run_full_agentic(self) -> Dict[str, float]:
-        """Evaluate the complete ASBRS pipeline with LLM intent re-ranking.
-
-        Pipeline:
-            SessionEncoder → HybridRetriever → IntentPlanner → IntentReranker
-
-        Returns:
-            Dict[str, float] with averaged Recall@K, MRR@K, HitRate@K.
-
-        Note:
-            IntentPlanner requires a valid GEMINI_API_KEY.  If the API is
-            unavailable the planner falls back to a default IntentResult and
-            the run still completes.
-        """
-        import random
-        import time
-        import torch
-
-        from agent.planner import IntentPlanner
-        from agent.reranker import IntentReranker
-        from models.encoder import SessionEncoder
-        from retrieval.collaborative import ItemBasedCF
-        from retrieval.content_based import ContentBasedFilter
-        from retrieval.hybrid import HybridRetriever
-
-        # Subsample to avoid blowing past the Gemini free-tier quota
-        # (~10 RPM, ~250 RPD). The other variants still use the full test set;
-        # this one is sampled for cost reasons.
-        if 0 < self.agentic_n_samples < len(self.test_sessions):
-            rng = random.Random(self.cfg.project.seed)
-            agentic_sessions = rng.sample(
-                self.test_sessions, self.agentic_n_samples
-            )
-            logger.info(
-                "AblationStudy: agentic variant subsampled to %d / %d sessions"
-                " (free-tier safe). Set agentic_n_samples=0 to use all.",
-                self.agentic_n_samples,
-                len(self.test_sessions),
-            )
-        else:
-            agentic_sessions = self.test_sessions
-
-        logger.info("AblationStudy: running full agentic pipeline …")
-
-        agent_cfg = self.cfg.agent
-        model_cfg = self.cfg.model
-        ret_cfg = self.cfg.retrieval
-
-        vocab_size = len(self.vocab)
-        encoder = SessionEncoder(
-            vocab_size=vocab_size,
-            embed_dim=model_cfg.embedding_dim,
-            hidden_dim=model_cfg.hidden_dim,
-            num_heads=model_cfg.num_attention_heads,
-            dropout=model_cfg.dropout,
-            padding_idx=0,
-        )
-        self._load_encoder_weights(encoder)
-        encoder.eval()
-
-        training_sessions = [
-            self._session_to_int_ids(s[:-1]) for s in self.test_sessions
-        ]
-        cf = ItemBasedCF()  # top_k passed per-call to get_candidates()
-        interaction_matrix = self._sessions_to_csr(training_sessions, len(self.vocab))
-        cf.fit(interaction_matrix)
-
-        cb = ContentBasedFilter()
-        cb.fit(self.item_metadata)
-
-        hybrid = HybridRetriever(cf=cf, cb=cb)
-
-        reranker = IntentReranker()
-        reranker.fit(self.item_metadata)
-
-        planner = IntentPlanner(
-            llm_model=agent_cfg.llm_model,
-            max_tokens=agent_cfg.llm_max_tokens,
-        )
-
-        max_k = max(self._k_values)
-        max_len = model_cfg.max_seq_len
-        predictions: List[tuple[List[int], int]] = []
-
-        with torch.no_grad():
-            for idx, session in enumerate(agentic_sessions):
-                seed_strs = session[:-1]
-                seed_int = self._session_to_int_ids(seed_strs)
-                gt = self._get_ground_truth(session)
-
-                # Encode session for intent inference.
-                pad_idx = 0
-                padded = seed_int[-max_len:] if len(seed_int) >= max_len else (
-                    [pad_idx] * (max_len - len(seed_int)) + seed_int
-                )
-                input_tensor = torch.tensor([padded], dtype=torch.long)
-                lengths = torch.tensor(
-                    [min(len(seed_int), max_len)], dtype=torch.long
-                )
-                session_repr, _attn, _hiddens = encoder(input_tensor, lengths)
-                # (session repr computed but not directly needed — hybrid retrieval used below)
-
-                # Retrieve hybrid candidates.
-                candidates = hybrid.retrieve(seed_int, max_k, self.vocab)
-
-                # Infer intent from seed item titles.
-                asin_to_title = dict(
-                    zip(
-                        self.item_metadata["item_id"].astype(str),
-                        self.item_metadata["title"].fillna("").astype(str),
-                    )
-                )
-                seed_titles = [
-                    asin_to_title.get(asin, asin) for asin in seed_strs
-                ]
-                uniform_weights = [1.0 / len(seed_titles)] * len(seed_titles)
-                intent = planner.infer_intent(seed_titles, uniform_weights)
-                # Stay under the Gemini free-tier RPM ceiling (~10 RPM).
-                if self.agentic_call_delay > 0 and idx < len(agentic_sessions) - 1:
-                    time.sleep(self.agentic_call_delay)
-
-                # Re-rank.
-                ranked = reranker.rerank(
-                    candidates, intent, self.vocab, self.item_metadata, max_k
-                )
-                rec_ids = [r.item_id for r in ranked]
-                predictions.append((rec_ids, gt))
-
-        return evaluate_model(predictions, self._k_values)
-
     # ── Aggregate runner ──────────────────────────────────────────────────────
 
     def run_all(self) -> pd.DataFrame:
-        """Run all four variants and return a formatted comparison DataFrame.
+        """Run all three variants and return a formatted comparison DataFrame.
 
         Columns: Model | Recall@5 | Recall@10 | Recall@20 | MRR@10 | HitRate@10
 
@@ -447,7 +300,6 @@ class AblationStudy:
             "Popularity Baseline": self.run_popularity_baseline,
             "CF Only": self.run_cf_only,
             "GRU + Attention": self.run_gru_attention,
-            "Full Agentic (ASBRS)": self.run_full_agentic,
         }
 
         rows: List[Dict[str, object]] = []

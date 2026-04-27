@@ -189,8 +189,6 @@ def main(
     config_path: str = "config/config.yaml",
     n_human: int = 10,
     output_dir: str = "evaluation",
-    agentic_n_samples: int = 50,
-    agentic_call_delay: float = 6.5,
 ) -> None:
     """Run the full evaluation pipeline.
 
@@ -239,8 +237,6 @@ def main(
         item_metadata=item_metadata,
         cfg=cfg,
         checkpoint_path=ckpt_path,
-        agentic_n_samples=agentic_n_samples,
-        agentic_call_delay=agentic_call_delay,
     )
     results_df = study.run_all()
 
@@ -262,54 +258,109 @@ def main(
 
     print("[evaluate] Generating human evaluation sheet …")
 
-    # Build placeholder recommendations / intents for sessions where we lack
-    # full pipeline outputs.  In a full run these would come from the model.
+    # Build real top-5 recommendations from the trained GRU+Attention encoder.
     from agent.interfaces import IntentResult, RecommendationOutput
+    from data.vocab import PAD_IDX, UNK_IDX
+    from models.encoder import SessionEncoder
 
-    placeholder_intents: list[IntentResult] = [
-        IntentResult(
-            intent_summary="browsing electronics",
-            top_items=sess[:3] if len(sess) >= 3 else sess,
-            confidence=0.0,
-            keywords=[],
+    asin_to_title = dict(
+        zip(
+            item_metadata["item_id"].astype(str),
+            item_metadata["title"].fillna("").astype(str),
         )
-        for sess in test_sessions
-    ]
+    )
 
-    placeholder_recs: list[list[RecommendationOutput]] = [
-        [
-            RecommendationOutput(
-                rank=i + 1,
-                item_id=i,
-                item_title=f"Item {i + 1}",
-                final_score=1.0 / (i + 1),
-                explanation="Recommended based on your recent browsing history.",
+    encoder = SessionEncoder(
+        vocab_size=len(vocab),
+        embed_dim=cfg.model.embedding_dim,
+        hidden_dim=cfg.model.hidden_dim,
+        num_heads=cfg.model.num_attention_heads,
+        dropout=cfg.model.dropout,
+        padding_idx=0,
+    )
+    if ckpt_path and Path(ckpt_path).exists():
+        payload = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        encoder.load_state_dict(payload["model_state_dict"])
+    encoder.eval()
+
+    max_len = cfg.model.max_seq_len
+    real_recs: list[list[RecommendationOutput]] = []
+    real_intents: list[IntentResult] = []
+    display_sessions: list[list[str]] = []
+
+    with torch.no_grad():
+        for session in test_sessions:
+            seed_strs = session[:-1]
+            seed_int = [vocab.encode(asin) for asin in seed_strs]
+            padded = (
+                seed_int[-max_len:]
+                if len(seed_int) >= max_len
+                else [PAD_IDX] * (max_len - len(seed_int)) + seed_int
             )
-            for i in range(5)
-        ]
-        for _ in test_sessions
-    ]
+            input_t = torch.tensor([padded], dtype=torch.long)
+            lengths_t = torch.tensor(
+                [min(len(seed_int), max_len)], dtype=torch.long
+            )
+            session_repr, _attn, _hiddens = encoder(input_t, lengths_t)
+            scores = encoder.predict_scores(
+                session_repr, encoder.item_embedding.embedding.weight
+            )[0]
+            scores[PAD_IDX] = float("-inf")
+            scores[UNK_IDX] = float("-inf")
+            top_ids = scores.argsort(descending=True)[:5].tolist()
+            top_scores = [float(scores[i]) for i in top_ids]
+
+            recs_for_session: list[RecommendationOutput] = []
+            for rank_idx, (item_id, score) in enumerate(zip(top_ids, top_scores)):
+                asin = vocab.decode(item_id)
+                title = asin_to_title.get(asin, asin) or asin
+                recs_for_session.append(
+                    RecommendationOutput(
+                        rank=rank_idx + 1,
+                        item_id=item_id,
+                        item_title=title,
+                        final_score=score,
+                        explanation=(
+                            "Recommended by GRU+Attention based on your session."
+                        ),
+                    )
+                )
+            real_recs.append(recs_for_session)
+
+            session_titles = [
+                asin_to_title.get(asin, asin) or asin for asin in seed_strs
+            ]
+            display_sessions.append(session_titles)
+            real_intents.append(
+                IntentResult(
+                    intent_summary=" ".join(session_titles[:3]),
+                    top_items=session_titles[:3],
+                    confidence=1.0,
+                    keywords=[],
+                )
+            )
 
     html_path = output_path / "human_eval_sheet.html"
     exporter = HumanEvalExporter(output_path=html_path, seed=cfg.project.seed)
     exporter.generate_eval_sheet(
-        sessions=test_sessions,
-        recommendations=placeholder_recs,
-        intents=placeholder_intents,
+        sessions=display_sessions,
+        recommendations=real_recs,
+        intents=real_intents,
         n_sessions=n_human,
     )
     print(f"[evaluate] Human eval sheet written to {html_path}")
 
     # ── Step 7: Print final summary ───────────────────────────────────────────
 
-    full_row = results_df[results_df["Model"] == "Full Agentic (ASBRS)"]
-    if not full_row.empty:
-        recall10 = full_row["Recall@10"].values[0]
-        print(
-            f"\nBest model: Full Agentic | Recall@10: {recall10:.4f}"
-        )
+    valid = results_df.dropna(subset=["Recall@10"])
+    if valid.empty:
+        print("\n[evaluate] No variant produced valid metrics.")
     else:
-        print("\n[evaluate] Full agentic results not available.")
+        best_row = valid.loc[valid["Recall@10"].idxmax()]
+        print(
+            f"\nBest model: {best_row['Model']} | "
+            f"Recall@10: {best_row['Recall@10']:.4f}"
+        )
 
 
 # ── CLI entry ─────────────────────────────────────────────────────────────────
@@ -345,33 +396,10 @@ if __name__ == "__main__":
         dest="output_dir",
         help="Directory for output files (default: evaluation).",
     )
-    parser.add_argument(
-        "--agentic-n",
-        type=int,
-        default=5,
-        dest="agentic_n_samples",
-        help=(
-            "Number of test sessions to evaluate the Full Agentic variant on "
-            "(uses Gemini API). Default 50 to stay within free-tier quota. "
-            "Set 0 to use all test sessions."
-        ),
-    )
-    parser.add_argument(
-        "--agentic-delay",
-        type=float,
-        default=6.5,
-        dest="agentic_call_delay",
-        help=(
-            "Seconds to sleep between Gemini calls (default 6.5s ≈ 9 RPM, "
-            "under the 10 RPM free-tier limit). Set 0 to disable."
-        ),
-    )
     args = parser.parse_args()
     main(
         checkpoint=args.checkpoint,
         config_path=args.config_path,
         n_human=args.n_human,
         output_dir=args.output_dir,
-        agentic_n_samples=args.agentic_n_samples,
-        agentic_call_delay=args.agentic_call_delay,
     )

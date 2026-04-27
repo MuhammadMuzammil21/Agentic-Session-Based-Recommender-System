@@ -16,7 +16,6 @@ import random
 import sys
 from pathlib import Path
 from typing import List
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -197,7 +196,7 @@ def run_retrieval(sessions, vocab):
     assert isinstance(candidates, list), "HybridRetriever.retrieve must return a list"
     return hybrid, df
 
-# ── Step 6: Full agentic pipeline (LLM mocked) ───────────────────────────────
+# ── Step 6: Full pipeline (no LLM) ───────────────────────────────────────────
 
 def run_agentic_pipeline(sessions, vocab, hybrid, item_metadata, encoder):
     from agent.interfaces import IntentResult
@@ -208,53 +207,47 @@ def run_agentic_pipeline(sessions, vocab, hybrid, item_metadata, encoder):
     reranker.fit(item_metadata)
     explainer = RecommendationExplainer()
 
-    mock_intent = IntentResult(
-        intent_summary="looking for electronics accessories",
-        top_items=["Product ITEM_001", "Product ITEM_002"],
-        confidence=0.9,
-        keywords=["electronics", "accessories"],
+    session = sessions[0]
+    seed_strs = session.item_ids[:-1]
+    seed_int  = [vocab.encode(a) for a in seed_strs]
+
+    # Encode
+    max_len = MAX_SEQ_LEN
+    padded = ([0] * (max_len - len(seed_int)) + seed_int)[-max_len:]
+    input_t = torch.tensor([padded], dtype=torch.long)
+    lens_t  = torch.tensor([min(len(seed_int), max_len)], dtype=torch.long)
+    with torch.no_grad():
+        _, attn_weights, _ = encoder(input_t, lens_t)
+    attn = attn_weights[0].tolist()[-len(seed_strs):]
+
+    # Retrieve
+    candidates = hybrid.retrieve(seed_int, TOP_K, vocab)
+
+    # Build a session-derived intent (no LLM).
+    asin_to_title = dict(zip(item_metadata["item_id"], item_metadata["title"]))
+    seed_titles_for_intent = [asin_to_title.get(a, a) for a in seed_strs]
+    intent = IntentResult(
+        intent_summary=" ".join(seed_titles_for_intent),
+        top_items=seed_titles_for_intent[:3],
+        confidence=1.0,
+        keywords=[],
     )
 
-    with patch("agent.planner.IntentPlanner.infer_intent", return_value=mock_intent):
-        from agent.planner import IntentPlanner
-        planner = IntentPlanner(llm_model="gemini-2.5-flash", max_tokens=200)
+    # Rerank
+    ranked = reranker.rerank(candidates, intent, vocab, item_metadata, TOP_K)
 
-        session = sessions[0]
-        seed_strs = session.item_ids[:-1]
-        seed_int  = [vocab.encode(a) for a in seed_strs]
+    # Explain
+    titles = [asin_to_title.get(a, a) for a in seed_strs]
+    paired = sorted(zip(attn, titles), reverse=True)
+    s_attn  = [w for w, _ in paired]
+    s_titles = [t for _, t in paired]
 
-        # Encode
-        max_len = MAX_SEQ_LEN
-        padded = ([0] * (max_len - len(seed_int)) + seed_int)[-max_len:]
-        input_t = torch.tensor([padded], dtype=torch.long)
-        lens_t  = torch.tensor([min(len(seed_int), max_len)], dtype=torch.long)
-        with torch.no_grad():
-            _, attn_weights, _ = encoder(input_t, lens_t)
-        attn = attn_weights[0].tolist()[-len(seed_strs):]
-
-        # Retrieve
-        candidates = hybrid.retrieve(seed_int, TOP_K, vocab)
-
-        # Intent
-        uniform = [1.0 / len(seed_strs)] * len(seed_strs)
-        intent = planner.infer_intent(seed_strs, uniform)
-
-        # Rerank
-        ranked = reranker.rerank(candidates, intent, vocab, item_metadata, TOP_K)
-
-        # Explain
-        asin_to_title = dict(zip(item_metadata["item_id"], item_metadata["title"]))
-        titles = [asin_to_title.get(a, a) for a in seed_strs]
-        paired = sorted(zip(attn, titles), reverse=True)
-        s_attn  = [w for w, _ in paired]
-        s_titles = [t for _, t in paired]
-
-        outputs = explainer.format_recommendations(
-            ranked_items=ranked,
-            session_items=s_titles,
-            attn_weights=s_attn,
-            intent=intent,
-        )
+    outputs = explainer.format_recommendations(
+        ranked_items=ranked,
+        session_items=s_titles,
+        attn_weights=s_attn,
+        intent=intent,
+    )
 
     assert len(outputs) >= 0, "format_recommendations must return a list"
     return outputs

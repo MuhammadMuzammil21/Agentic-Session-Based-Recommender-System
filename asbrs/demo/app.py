@@ -27,7 +27,7 @@ from scipy.sparse import csr_matrix
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.explainer import RecommendationExplainer
-from agent.planner import IntentPlanner
+from agent.interfaces import IntentResult
 from agent.reranker import IntentReranker
 from config.settings import Config
 from data.vocab import Vocabulary
@@ -58,7 +58,6 @@ _cache: Dict[str, Any] = {
     "asin_to_title": None,
     "encoder": None,
     "hybrid": None,
-    "planner": None,
     "reranker": None,
     "explainer": None,
     "example_sessions": None,
@@ -293,11 +292,6 @@ def load_components() -> None:
     reranker = IntentReranker()
     reranker.fit(df)
     _cache["reranker"] = reranker
-
-    _cache["planner"] = IntentPlanner(
-        llm_model=cfg.agent.llm_model,
-        max_tokens=cfg.agent.llm_max_tokens,
-    )
     _cache["explainer"] = RecommendationExplainer()
 
     # ── Example sessions ──────────────────────────────────────────────────────
@@ -373,7 +367,6 @@ def recommend():
         vocab: Vocabulary = _cache["vocab"]
         encoder: SessionEncoder = _cache["encoder"]
         hybrid: HybridRetriever = _cache["hybrid"]
-        planner: IntentPlanner = _cache["planner"]
         reranker: IntentReranker = _cache["reranker"]
         explainer: RecommendationExplainer = _cache["explainer"]
         item_metadata: pd.DataFrame = _cache["item_metadata"]
@@ -411,9 +404,16 @@ def recommend():
         max_k = max(cfg.evaluation.k_values)
         candidates = hybrid.retrieve(seed_int, max_k, vocab)
 
-        # Step 4 — run IntentPlanner.infer_intent()
-        uniform_weights = [1.0 / len(session_titles)] * len(session_titles)
-        intent = planner.infer_intent(session_titles, uniform_weights)
+        # Step 4 — build a session-derived intent (no LLM).
+        # The reranker uses TF-IDF, so concatenated session titles work as
+        # the "intent text" — items textually similar to recent clicks
+        # are favoured.
+        intent = IntentResult(
+            intent_summary=" ".join(session_titles),
+            top_items=session_titles[:3],
+            confidence=1.0,
+            keywords=[],
+        )
 
         # Step 5 — run IntentReranker.rerank()
         ranked = reranker.rerank(candidates, intent, vocab, item_metadata, max_k)
