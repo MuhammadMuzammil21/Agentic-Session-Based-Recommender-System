@@ -189,6 +189,8 @@ def main(
     config_path: str = "config/config.yaml",
     n_human: int = 10,
     output_dir: str = "evaluation",
+    agentic_n_samples: int = 50,
+    agentic_call_delay: float = 6.5,
 ) -> None:
     """Run the full evaluation pipeline.
 
@@ -236,6 +238,9 @@ def main(
         vocab=vocab,
         item_metadata=item_metadata,
         cfg=cfg,
+        checkpoint_path=ckpt_path,
+        agentic_n_samples=agentic_n_samples,
+        agentic_call_delay=agentic_call_delay,
     )
     results_df = study.run_all()
 
@@ -340,10 +345,33 @@ if __name__ == "__main__":
         dest="output_dir",
         help="Directory for output files (default: evaluation).",
     )
+    parser.add_argument(
+        "--agentic-n",
+        type=int,
+        default=5,
+        dest="agentic_n_samples",
+        help=(
+            "Number of test sessions to evaluate the Full Agentic variant on "
+            "(uses Gemini API). Default 50 to stay within free-tier quota. "
+            "Set 0 to use all test sessions."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-delay",
+        type=float,
+        default=6.5,
+        dest="agentic_call_delay",
+        help=(
+            "Seconds to sleep between Gemini calls (default 6.5s ≈ 9 RPM, "
+            "under the 10 RPM free-tier limit). Set 0 to disable."
+        ),
+    )
     args = parser.parse_args()
     main(
         checkpoint=args.checkpoint,
         config_path=args.config_path,
         n_human=args.n_human,
         output_dir=args.output_dir,
+        agentic_n_samples=args.agentic_n_samples,
+        agentic_call_delay=args.agentic_call_delay,
     )

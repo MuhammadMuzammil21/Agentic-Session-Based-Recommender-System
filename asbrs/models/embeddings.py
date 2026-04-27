@@ -94,9 +94,13 @@ class ItemEmbedding(nn.Module):
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def get_all_embeddings(self) -> Tensor:
-        """Return the full embedding weight matrix (detached).
+        """Return the full embedding weight matrix.
+
+        Returns the live parameter tensor so gradients can flow during
+        training (cross-entropy needs to update target/non-target rows).
+        Eval call sites are responsible for using ``torch.no_grad()``.
 
         Returns:
             FloatTensor of shape [vocab_size, embed_dim].
         """
-        return self.embedding.weight.detach()
+        return self.embedding.weight

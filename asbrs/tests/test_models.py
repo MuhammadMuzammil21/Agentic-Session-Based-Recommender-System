@@ -127,10 +127,11 @@ class TestItemEmbedding:
         w = emb.get_all_embeddings()
         assert w.shape == (V, D)
 
-    def test_get_all_embeddings_is_detached(self) -> None:
+    def test_get_all_embeddings_is_trainable(self) -> None:
         emb = ItemEmbedding(vocab_size=V, embed_dim=D, dropout=0.0)
         w = emb.get_all_embeddings()
-        assert not w.requires_grad, "get_all_embeddings should return detached tensor"
+        assert w.requires_grad, "get_all_embeddings must keep grad for training"
+        assert w is emb.embedding.weight, "must be the live parameter tensor"
 
     def test_raises_on_bad_vocab_size(self) -> None:
         with pytest.raises(ValueError, match="vocab_size"):

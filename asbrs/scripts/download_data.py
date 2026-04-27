@@ -102,6 +102,15 @@ def main(cfg: Config) -> None:
     # ── 2. Filter interactions ─────────────────────────────────────────────────
     df = loader.filter_interactions(df, min_item_freq=cfg.data.min_item_freq)
 
+    # ── 2b. Persist item metadata (needed by evaluate.py & demo/app.py) ───────
+    item_metadata = (
+        df.drop_duplicates("item_id")
+          [["item_id", "title", "description", "category", "price"]]
+          .reset_index(drop=True)
+    )
+    _save_pickle(item_metadata, processed_dir / "item_metadata.pkl")
+    logger.info("Item metadata saved: %d unique items", len(item_metadata))
+
     # ── 3. Build sessions ──────────────────────────────────────────────────────
     sb = SessionBuilder()
     sessions = sb.build_sessions(df, window_hours=cfg.data.session_window_hours)

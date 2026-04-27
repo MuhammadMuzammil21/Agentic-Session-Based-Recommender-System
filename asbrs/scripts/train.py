@@ -144,6 +144,12 @@ def main(cfg: Config, device: torch.device, resume: str | None) -> None:
         lr=cfg.training.lr,
         weight_decay=cfg.training.weight_decay,
     )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=2,
+    )
 
     # ── Training loop ──────────────────────────────────────────────────────
     best_recall = -1.0
@@ -160,6 +166,7 @@ def main(cfg: Config, device: torch.device, resume: str | None) -> None:
         train_loss = trainer.train_epoch(train_loader, optimizer, device)
         val_metrics = trainer.evaluate(val_loader, device, k_values=k_values)
         val_recall10 = val_metrics.get("Recall@10", 0.0)
+        scheduler.step(val_recall10)
 
         is_best = val_recall10 > best_recall
         if is_best:

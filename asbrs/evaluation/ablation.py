@@ -60,21 +60,31 @@ class AblationStudy:
         vocab: Vocabulary,
         item_metadata: pd.DataFrame,
         cfg: Config,
+        checkpoint_path: Optional[Path] = None,
+        agentic_n_samples: int = 50,
+        agentic_call_delay: float = 6.5,
     ) -> None:
         """Initialise the ablation runner.
 
         Args:
-            test_sessions: Each session is an ordered list of item-ID strings
+            test_sessions:   Each session is an ordered list of item-ID strings
                 (ASINs). The last item is the held-out ground truth
                 (leave-one-out protocol).
-            vocab:         Fitted Vocabulary (maps ASIN ↔ integer index).
-            item_metadata: DataFrame with columns ``item_id`` and ``title``.
-            cfg:           Loaded Config object.
+            vocab:           Fitted Vocabulary (maps ASIN ↔ integer index).
+            item_metadata:   DataFrame with columns ``item_id`` and ``title``.
+            cfg:             Loaded Config object.
+            checkpoint_path: Optional path to a trained SessionEncoder
+                checkpoint (.pt). Used by GRU+Attention and Full Agentic
+                variants. If None or missing, those variants run with
+                random weights.
         """
         self.test_sessions = test_sessions
         self.vocab = vocab
         self.item_metadata = item_metadata
         self.cfg = cfg
+        self.checkpoint_path = checkpoint_path
+        self.agentic_n_samples = agentic_n_samples
+        self.agentic_call_delay = agentic_call_delay
         self._k_values: List[int] = cfg.evaluation.k_values
 
         # Lazy-initialised components (built on first use to avoid heavy
@@ -148,6 +158,26 @@ class AblationStudy:
             Integer index of the target item.
         """
         return self.vocab.encode(session[-1])
+
+    def _load_encoder_weights(self, encoder) -> None:
+        """Load trained weights from checkpoint_path into ``encoder`` (in-place).
+
+        No-op if no checkpoint was provided or the file is missing.
+        """
+        import torch
+
+        if not self.checkpoint_path:
+            logger.warning(
+                "No checkpoint provided — encoder will run with random weights."
+            )
+            return
+        path = Path(self.checkpoint_path)
+        if not path.exists():
+            logger.warning("Checkpoint path %s does not exist.", path)
+            return
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        encoder.load_state_dict(payload["model_state_dict"])
+        logger.info("Encoder weights loaded from %s", path)
 
     # ── Variant 1: Popularity baseline ───────────────────────────────────────
 
@@ -237,6 +267,7 @@ class AblationStudy:
             dropout=model_cfg.dropout,
             padding_idx=0,
         )
+        self._load_encoder_weights(encoder)
         encoder.eval()
 
         max_k = max(self._k_values)
@@ -286,6 +317,8 @@ class AblationStudy:
             unavailable the planner falls back to a default IntentResult and
             the run still completes.
         """
+        import random
+        import time
         import torch
 
         from agent.planner import IntentPlanner
@@ -294,6 +327,23 @@ class AblationStudy:
         from retrieval.collaborative import ItemBasedCF
         from retrieval.content_based import ContentBasedFilter
         from retrieval.hybrid import HybridRetriever
+
+        # Subsample to avoid blowing past the Gemini free-tier quota
+        # (~10 RPM, ~250 RPD). The other variants still use the full test set;
+        # this one is sampled for cost reasons.
+        if 0 < self.agentic_n_samples < len(self.test_sessions):
+            rng = random.Random(self.cfg.project.seed)
+            agentic_sessions = rng.sample(
+                self.test_sessions, self.agentic_n_samples
+            )
+            logger.info(
+                "AblationStudy: agentic variant subsampled to %d / %d sessions"
+                " (free-tier safe). Set agentic_n_samples=0 to use all.",
+                self.agentic_n_samples,
+                len(self.test_sessions),
+            )
+        else:
+            agentic_sessions = self.test_sessions
 
         logger.info("AblationStudy: running full agentic pipeline …")
 
@@ -310,6 +360,7 @@ class AblationStudy:
             dropout=model_cfg.dropout,
             padding_idx=0,
         )
+        self._load_encoder_weights(encoder)
         encoder.eval()
 
         training_sessions = [
@@ -319,7 +370,7 @@ class AblationStudy:
         interaction_matrix = self._sessions_to_csr(training_sessions, len(self.vocab))
         cf.fit(interaction_matrix)
 
-        cb = ContentBasedFilter(top_k=ret_cfg.content_top_k)
+        cb = ContentBasedFilter()
         cb.fit(self.item_metadata)
 
         hybrid = HybridRetriever(cf=cf, cb=cb)
@@ -337,7 +388,7 @@ class AblationStudy:
         predictions: List[tuple[List[int], int]] = []
 
         with torch.no_grad():
-            for session in self.test_sessions:
+            for idx, session in enumerate(agentic_sessions):
                 seed_strs = session[:-1]
                 seed_int = self._session_to_int_ids(seed_strs)
                 gt = self._get_ground_truth(session)
@@ -369,6 +420,9 @@ class AblationStudy:
                 ]
                 uniform_weights = [1.0 / len(seed_titles)] * len(seed_titles)
                 intent = planner.infer_intent(seed_titles, uniform_weights)
+                # Stay under the Gemini free-tier RPM ceiling (~10 RPM).
+                if self.agentic_call_delay > 0 and idx < len(agentic_sessions) - 1:
+                    time.sleep(self.agentic_call_delay)
 
                 # Re-rank.
                 ranked = reranker.rerank(

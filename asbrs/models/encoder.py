@@ -17,6 +17,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from config.settings import Config
+from data.vocab import PAD_IDX, UNK_IDX
 from models.attention import SelfAttentionLayer
 from models.embeddings import ItemEmbedding
 
@@ -295,6 +296,10 @@ class NextItemTrainer:
                 session_repr, _, _ = self.encoder(input_ids, lengths)
                 item_embs = self.encoder.item_embedding.get_all_embeddings().to(device)
                 logits = self.encoder.predict_scores(session_repr, item_embs)  # [B, V]
+
+                # PAD and UNK are not real items; never recommend them.
+                logits[:, PAD_IDX] = float("-inf")
+                logits[:, UNK_IDX] = float("-inf")
 
                 for k in k_values:
                     top_k = torch.topk(logits, k, dim=-1).indices     # [B, k]
