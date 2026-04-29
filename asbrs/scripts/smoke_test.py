@@ -152,105 +152,29 @@ def train_encoder(encoded_sessions, vocab_size):
     encoder.eval()
     return encoder
 
-# ── Step 5: Hybrid retrieval ──────────────────────────────────────────────────
+# ── Step 5: Encoder scoring path ──────────────────────────────────────────────
 
-def run_retrieval(sessions, vocab):
-    import pandas as pd
-    from scipy.sparse import csr_matrix
-    from retrieval.collaborative import ItemBasedCF
-    from retrieval.content_based import ContentBasedFilter
-    from retrieval.hybrid import HybridRetriever
-
-    vocab_size = len(vocab)
-
-    # Build CF interaction matrix
-    rows, cols = [], []
-    for s in sessions:
-        for asin in s.item_ids[:-1]:
-            rows.append(0)
-            cols.append(vocab.encode(asin))
-    data = np.ones(len(rows), dtype=np.float32)
-    matrix = csr_matrix((data, (rows, cols)), shape=(1, vocab_size))
-
-    cf = ItemBasedCF()
-    cf.fit(matrix)
-
-    # Build metadata DataFrame
-    all_asins = [vocab.decode(i) for i in range(2, vocab_size)]  # skip PAD/UNK
-    df = pd.DataFrame({
-        "item_id":     all_asins,
-        "title":       [f"Product {a}" for a in all_asins],
-        "description": [f"Description of {a}" for a in all_asins],
-        "category":    ["Electronics"] * len(all_asins),
-        "price":       [float(i) * 9.99 for i in range(len(all_asins))],
-    })
-
-    cb = ContentBasedFilter()
-    cb.fit(df)
-
-    hybrid = HybridRetriever(cf=cf, cb=cb)
-
-    # Retrieve for first session
-    seed_int = [vocab.encode(a) for a in sessions[0].item_ids[:-1]]
-    candidates = hybrid.retrieve(seed_int, TOP_K, vocab)
-    assert isinstance(candidates, list), "HybridRetriever.retrieve must return a list"
-    return hybrid, df
-
-# ── Step 6: Full pipeline (no LLM) ───────────────────────────────────────────
-
-def run_agentic_pipeline(sessions, vocab, hybrid, item_metadata, encoder):
-    from agent.interfaces import IntentResult
-    from agent.reranker import IntentReranker
-    from agent.explainer import RecommendationExplainer
-
-    reranker = IntentReranker()
-    reranker.fit(item_metadata)
-    explainer = RecommendationExplainer()
-
+def run_encoder_scoring(sessions, vocab, encoder):
+    """Run the inference path used by the demo: encode → score → top-K."""
     session = sessions[0]
     seed_strs = session.item_ids[:-1]
-    seed_int  = [vocab.encode(a) for a in seed_strs]
+    seed_int = [vocab.encode(a) for a in seed_strs]
 
-    # Encode
     max_len = MAX_SEQ_LEN
     padded = ([0] * (max_len - len(seed_int)) + seed_int)[-max_len:]
     input_t = torch.tensor([padded], dtype=torch.long)
-    lens_t  = torch.tensor([min(len(seed_int), max_len)], dtype=torch.long)
+    lens_t = torch.tensor([min(len(seed_int), max_len)], dtype=torch.long)
+
     with torch.no_grad():
-        _, attn_weights, _ = encoder(input_t, lens_t)
-    attn = attn_weights[0].tolist()[-len(seed_strs):]
+        session_repr, attn_weights, _ = encoder(input_t, lens_t)
+        scores = encoder.predict_scores(
+            session_repr, encoder.item_embedding.embedding.weight
+        )[0]
+        top_scores, top_ids = torch.topk(scores, k=TOP_K)
 
-    # Retrieve
-    candidates = hybrid.retrieve(seed_int, TOP_K, vocab)
-
-    # Build a session-derived intent (no LLM).
-    asin_to_title = dict(zip(item_metadata["item_id"], item_metadata["title"]))
-    seed_titles_for_intent = [asin_to_title.get(a, a) for a in seed_strs]
-    intent = IntentResult(
-        intent_summary=" ".join(seed_titles_for_intent),
-        top_items=seed_titles_for_intent[:3],
-        confidence=1.0,
-        keywords=[],
-    )
-
-    # Rerank
-    ranked = reranker.rerank(candidates, intent, vocab, item_metadata, TOP_K)
-
-    # Explain
-    titles = [asin_to_title.get(a, a) for a in seed_strs]
-    paired = sorted(zip(attn, titles), reverse=True)
-    s_attn  = [w for w, _ in paired]
-    s_titles = [t for _, t in paired]
-
-    outputs = explainer.format_recommendations(
-        ranked_items=ranked,
-        session_items=s_titles,
-        attn_weights=s_attn,
-        intent=intent,
-    )
-
-    assert len(outputs) >= 0, "format_recommendations must return a list"
-    return outputs
+    assert top_ids.shape[0] == TOP_K, "expected TOP_K candidates"
+    assert attn_weights.shape[0] == 1, "attention should match batch size"
+    return top_ids.tolist(), top_scores.tolist()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -277,13 +201,9 @@ def main() -> None:
         encoder = train_encoder(encoded, len(vocab))
         print("    Encoder trained OK")
 
-        print("[5] Running hybrid retrieval …")
-        hybrid, item_metadata = run_retrieval(sessions, vocab)
-        print("    Hybrid retrieval OK")
-
-        print("[6] Running full agentic pipeline (LLM mocked) …")
-        outputs = run_agentic_pipeline(sessions, vocab, hybrid, item_metadata, encoder)
-        print(f"    Pipeline produced {len(outputs)} recommendation(s)")
+        print("[5] Running encoder scoring (demo inference path) …")
+        top_ids, top_scores = run_encoder_scoring(sessions, vocab, encoder)
+        print(f"    Top-{TOP_K} produced (highest score: {top_scores[0]:+.3f})")
 
         print()
         print("=" * 60)
