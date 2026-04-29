@@ -27,6 +27,13 @@ You'll see these words a lot. Here's what they mean in this project:
 | **Vocabulary (vocab)** | The dictionary that maps each ASIN to its integer id and back. Stored in `vocab.json`. |
 | **Embedding** | A list of 64 numbers that represents one item. Items that get clicked together will end up with similar embeddings after training. |
 | **PAD / UNK** | Special tokens. `PAD` (id 0) is empty padding. `UNK` (id 1) means "an item the model has never seen." |
+
+Without PAD:
+❌ model can’t handle variable-length sequences
+
+Without UNK:
+❌ model breaks when it sees new items
+
 | **GRU** | A type of recurrent neural network. It reads a sequence one step at a time and remembers context. |
 | **Attention** | A layer that scores how important each past item is for predicting the next one. The score is what the demo's bar chart shows. |
 | **Tensor** | PyTorch's name for a multi-dimensional array. `[256, 50]` means 256 rows of 50 numbers. |
@@ -43,15 +50,14 @@ You'll see these words a lot. Here's what they mean in this project:
 asbrs/
 ├── config/          configuration & typed loader
 ├── data/            data pipeline (stream → sessions → encode)
-├── models/          neural network parts
-├── retrieval/       classic (non-neural) recommenders
-├── evaluation/      metrics, ablation runner, HTML eval sheet
+├── models/          GRU + Attention neural network
+├── evaluation/      metrics, HTML eval sheet
 ├── demo/            Flask web app
 ├── scripts/         CLI entry points (download, train, evaluate, smoke)
 ├── tests/           pytest unit tests
 ├── checkpoints/     saved model weights
 ├── data/processed/  preprocessed pickles + vocab.json + item_metadata.pkl
-├── evaluation/      output: ablation_results.csv/md, human_eval_sheet.html
+├── evaluation/      output: results.csv/md, human_eval_sheet.html
 └── requirements.txt
 ```
 
@@ -94,28 +100,19 @@ After running `download_data.py` you'll see new files inside `data/processed/`:
 | `attention.py` | `SelfAttentionLayer` — multi-head attention. Takes the GRU's hidden states for every step in the sequence and produces (a) one summary vector for the whole session, and (b) per-item attention weights (the bar-chart numbers). |
 | `encoder.py` | Two classes: `SessionEncoder` (the full network: embedding → GRU → attention → score) and `NextItemTrainer` (the training loop with Adam optimiser, gradient clipping, and validation evaluation). |
 
-### `retrieval/` — non-neural baseline
-
-Classic algorithm used as a comparison point in the ablation study.
-
-| File | What it does |
-|---|---|
-| `collaborative.py` | `ItemBasedCF` — "users who clicked X also clicked Y." Builds a sparse item × item cosine-similarity matrix from training sessions. Used by the **CF Only** ablation variant. |
-
 ### `evaluation/` — measuring how well it works
 
 | File | What it does |
 |---|---|
 | `metrics.py` | Pure functions: `recall_at_k`, `mrr_at_k`, `hit_rate_at_k`, plus a batch helper `evaluate_model` that averages them across many sessions. |
-| `ablation.py` | `AblationStudy` — runs three model variants (Popularity, CF Only, GRU + Attention) on the test set and produces a comparison DataFrame. |
 | `human_eval.py` | `HumanEvalExporter` — writes a self-contained HTML page where humans can rate the model's recommendations on a 5-star scale. |
 
 After running `evaluate.py` you'll see:
 
 | File | What it contains |
 |---|---|
-| `evaluation/ablation_results.csv` | The 3-row metrics table, machine-readable. |
-| `evaluation/ablation_results.md` | Same table as Markdown — paste into `README.md`. |
+| `evaluation/results.csv` | The metrics row for the trained model, machine-readable. |
+| `evaluation/results.md` | Same row as Markdown — paste into `README.md`. |
 | `evaluation/human_eval_sheet.html` | Standalone HTML for human raters; shows N test sessions with the model's top-5 picks and a star widget. |
 
 ### `demo/` — the Flask web app
@@ -251,145 +248,266 @@ Training complete.
 
 ### Step 3 — `python scripts/evaluate.py`
 
-### A note on terminology
+This script runs the **trained GRU + Attention model** on the held-out
+test set, reports the metrics, and writes a human-evaluation HTML page.
 
-We loosely call this an "ablation study" in the code (`AblationStudy`,
-`evaluate.py`), but **strictly speaking it is a baseline comparison**. A
-true ablation takes one full system and progressively removes pieces from
-it (full → minus-A → minus-B) to measure how much each piece contributes.
+Single-model evaluation — no comparison table, no baselines, no LLM. Just
+the model you built scored honestly on data it has never seen.
 
-What we actually do here is run **three independent algorithms** on the
-same test set. They don't share components and don't progressively strip
-each other. They each produce their own top-K recommendations from scratch:
+#### What happens, top to bottom
 
-| Variant | Uses popularity? | Uses item co-occurrence? | Uses neural net? |
-|---|:---:|:---:|:---:|
-| Popularity Baseline | ✓ | ✗ | ✗ |
-| CF Only             | ✗ | ✓ | ✗ |
-| GRU + Attention     | ✗ | ✗ | ✓ |
+1. Load `vocab.json`, `test_sessions.pkl`, and `item_metadata.pkl`.
+2. Auto-pick the highest-recall checkpoint from `checkpoints/`.
+3. Build a `SessionEncoder` and load the checkpoint weights.
+4. For every one of the test sessions, run the encoder forward pass and
+   take the top-K candidate items (where K is the largest value in
+   `cfg.evaluation.k_values`, default 20).
+5. Hand `(top_ids, ground_truth_id)` pairs to
+   `evaluation/metrics.py:evaluate_model`, which averages Recall@K, MRR@K
+   and HitRate@K across all sessions.
+6. Print and save a one-row results table.
+7. Generate `human_eval_sheet.html` with 10 random sessions and the
+   model's real top-5 picks for each.
 
-So when you read the results, think of it as: "three different algorithms
-are competing on the same test set; here's how they ranked."
-
-### How each variant works (in detail)
-
-#### 1. Popularity Baseline — the floor
-
-What it does: counts how often each item appears across all test sessions
-(excluding the held-out targets), sorts by count, takes the top-K, and
-recommends **the same list to every user**. No personalisation, no
-training, no signal from what the current user clicked.
-
-Why it's there: if your fancy neural model can't beat "just recommend the
-most popular stuff," your model isn't doing anything. It's the absolute
-floor that any sane recommender should clear.
-
-What hurts it: it ignores the user entirely. If you're shopping for cables
-but the most popular Electronics item is a Fire Stick, you'll always see
-the Fire Stick.
-
-Reading the result: a popularity score that's noticeably high tells you the
-test set has a lot of "everybody clicks the same hot item" pattern. If the
-neural model only barely beats it, that's a sign the dataset is heavily
-popularity-biased rather than truly personalised.
-
-#### 2. CF Only — classic collaborative filtering
-
-What it does: builds a sparse user × item matrix where each session is one
-"user", then computes how similar each pair of items is using cosine
-similarity on the columns. To recommend, it sums the similarity-column of
-every item the current user has clicked, sorts items by that sum, and
-takes the top-K.
-
-Plain English: "users who clicked X also clicked Y, so if you clicked X,
-you'll probably like Y." It only knows about co-occurrence — which items
-tend to appear together in sessions.
-
-Why it's there: collaborative filtering is the textbook recommender from
-the 1990s. It's a well-known reference point — a "what would happen if we
-didn't use machine learning at all" answer.
-
-What hurts it on small data: with only ~10K sessions and ~7K items, most
-items only co-occur with a handful of others. The similarity matrix is
-mostly zeros, so the algorithm has very little signal to work with.
-
-#### 3. GRU + Attention — the trained neural model
-
-What it does: loads your saved checkpoint (e.g.
-`checkpoints/epoch_001_recall0.0470.pt`). For each test session:
-
-1. Convert ASINs to integer ids and pad to length 50.
-2. Run them through `ItemEmbedding` → `GRU` → `SelfAttention` to produce
-   one 128-number summary vector for the whole session (`session_repr`).
-3. Multiply this vector against the embedding of every item in the
-   vocabulary → one score per item.
-4. Mask out PAD (id 0) and UNK (id 1) so they can't be recommended.
-5. Take the top-K highest-scoring items.
-
-Plain English: this is the trained brain. It has learned, from millions of
-sessions, that certain item ids tend to follow certain other item ids in
-sequence. It uses that learned pattern to predict what comes next.
-
-Why it's the headline result: this is what you actually built. Everything
-else is here only to make this row look meaningful.
-
-What hurts it on small data: it has limited training examples per item
-(roughly 6 occurrences per item with 8K sessions and 7K vocabulary), so
-it can only learn so much. With a million-session dataset it would do
-much better, but the absolute architecture is the same.
-
-### What the results table tells you
+#### Example console output
 
 ```
 ========================================================================
-              Model  Recall@5  Recall@10  Recall@20   MRR@10  HitRate@10
-Popularity Baseline    0.0221     0.0478     0.0653   0.0117      0.0478
-            CF Only    0.0110     0.0212     0.0331   0.0065      0.0212
-    GRU + Attention    0.0294     0.0423     0.0718   0.0206      0.0423
+  GRU + ATTENTION  ·  TEST-SET METRICS
 ========================================================================
+           Model  Recall@5  MRR@5  HitRate@5  Recall@10  MRR@10  ...
+ GRU + Attention    0.0294 0.0189     0.0294     0.0423  0.0206
+========================================================================
+
+Done. Recall@10 = 0.0423  ·  MRR@10 = 0.0206
 ```
 
-Each row is one algorithm. Each column is one metric (averaged over all
-1,087 test sessions).
+#### How to read the metrics
 
-How to read these numbers:
+- **Recall@K** answers "did the correct next item land somewhere in the
+  top-K recommendations?". Higher is better. `0.0423` ≈ 4.2% of the test
+  sessions had the true next item in the model's top 10.
+- **MRR@K** (mean reciprocal rank) cares about *where* the correct item
+  appeared. Top-1 hit = 1.0, top-2 = 0.5, top-5 = 0.2, miss = 0. So MRR is
+  the "is the answer near the top of the list, or buried at rank 9"
+  metric. Higher MRR than Recall × (1/K) means the model is putting the
+  right answer near the top, not just somewhere in the K window.
+- **HitRate@K** is the same as Recall@K when each session has exactly one
+  correct answer (true here). Kept for completeness.
 
-- **Recall@K** answers: "Did the correct item land somewhere in the top-K
-  recommendations?" Higher is better. `0.0294 = 2.94%` of the time, the
-  GRU's top-5 contained the actual next item.
-- **MRR@K** (mean reciprocal rank) is similar but weights *position*. If
-  the right item is at rank 1, the model gets 1.0. Rank 2: 0.5. Rank 5:
-  0.2. Miss: 0. Higher MRR means the model isn't just hitting the top-K,
-  it's putting the answer near the *top* of the top-K.
-- **HitRate@K** is identical to Recall@K when there's only one correct
-  item per session (which is always true here). Kept for completeness.
+These numbers will look small in absolute terms (a few percent). That's
+normal for a small dataset — the model has 6,988 items to choose from per
+session and only ~6 training examples per item. With a million-session
+dataset on the same architecture, papers typically report Recall@10 in the
+0.10–0.25 range. What matters is that the model **beats random chance by a
+clear margin** (random top-10 would be 10/6988 ≈ 0.0014).
 
-What the row-by-row picture says (in this run):
+#### Files written to `evaluation/`
 
-- **GRU + Attention wins Recall@5, Recall@20, and MRR@10.** The "I put the
-  right answer near the top" metric (MRR@10 = 0.0206) is roughly **2× the
-  popularity baseline (0.0117) and 3× the CF baseline (0.0065).** That's
-  the meaningful win.
-- **Popularity Baseline edges out at Recall@10** by a small margin. This
-  happens when the dataset has a popularity bias — many sessions end with
-  a globally popular item that sneaks into the top-10 by chance.
-- **CF Only is consistently the worst.** With this size of data the
-  similarity matrix is too sparse to give it a real shot.
+| File | What it contains |
+|---|---|
+| `results.csv` | One-row CSV with every metric. |
+| `results.md` | Same, as Markdown — paste into `README.md`. |
+| `human_eval_sheet.html` | 10 random test sessions with the model's real top-5 predictions and a 5-star rating widget. Open it in a browser to qualitatively check whether recommendations feel sensible. |
 
-The "best model" line at the end of the script just reports whichever row
-has the highest Recall@10, but you should look at the whole table — MRR is
-arguably the more meaningful metric for "is the model actually ranking
-things sensibly."
+---
 
-### What else `evaluate.py` produces
+### Step 3.5 — Deep dive: how GRU + Attention actually scores items
 
-After printing the table, the script also generates a **human-evaluation
-HTML sheet**: it encodes 10 random test sessions through the trained model,
-takes each session's top-5 predictions, and writes them into a
-self-contained HTML file (`evaluation/human_eval_sheet.html`) with
-star-rating widgets. The numeric metrics measure "did we put the right
-item in top-K?", but the HTML is for asking humans "do these
-recommendations *feel* sensible?"
+This section walks through what happens for **one** test session, with
+real shapes, so you can connect the demo's behaviour to the maths.
+
+Suppose the test session is:
+
+```
+[B00MCW7G9M, B07SM135LS, B08N5WRWNW]   ← what the user clicked
+                              ↑ held-out target we're trying to predict
+```
+
+The first two ASINs are the *input*; the third is the *target* we're
+trying to predict. Here is what `evaluate.py` does, step by step.
+
+#### A. ASIN → integer ids
+
+```python
+seed_int = [vocab.encode("B00MCW7G9M"), vocab.encode("B07SM135LS")]
+# e.g. [4521, 117]
+```
+
+The vocabulary is a plain dict mapping each known ASIN to a small
+integer. PAD is id 0, UNK (unknown item) is id 1, real items are 2 onwards.
+
+#### B. Left-pad to a fixed length
+
+The model expects every input to be a sequence of exactly `max_seq_len = 50`
+items (this is just so we can stack many sessions into one tensor at once
+during training). Anything shorter gets padded on the **left** with id 0:
+
+```
+padded = [0, 0, 0, ..., 0, 4521, 117]    ← length 50
+                                ^^^^   ^^^
+                               first   last
+                              (older)  (newest)
+```
+
+Why pad on the left, not the right? Because the GRU reads left-to-right
+and we want its **last** hidden state to reflect the most recent click.
+Padding on the right would put the real items first and a wall of empty
+PAD tokens at the end, washing the signal out.
+
+#### C. Convert id sequence to embedding sequence — `ItemEmbedding`
+
+```python
+embedded = item_embedding(input_ids)   # shape: [1, 50, 64]
+```
+
+`ItemEmbedding` is just a `[vocab_size × 64]` lookup table — for each
+integer id, it returns a vector of 64 numbers (the **embedding**). These
+numbers are what the model **learns** during training. Two items that
+appear in similar contexts in training will end up with similar vectors.
+
+After this step we have, for our session, a `[1, 50, 64]` tensor:
+- `1` = batch size (just one session at a time during inference)
+- `50` = positions
+- `64` = embedding dimension
+
+PAD positions (the first 48) get a zero vector — `ItemEmbedding` is
+configured with `padding_idx=0` so PAD's row is forced to all zeros and
+gets no gradient updates during training.
+
+#### D. Run through the GRU — sequence summarisation
+
+```python
+all_hiddens, _ = gru(embedded)   # shape: [1, 50, 128]
+```
+
+A **GRU** (gated recurrent unit) is a small recurrent network that walks
+through a sequence one step at a time, maintaining a *hidden state* that
+summarises everything seen so far. At each step it decides — using its
+learned "gates" — what to remember from the past and what to absorb from
+the new input.
+
+For our session:
+- At position 48 (first real item, `4521`), the GRU still has a near-zero
+  hidden state because everything before was PAD.
+- At position 49 (second real item, `117`), the GRU updates its hidden
+  state to combine what `4521` told it with what `117` is telling it.
+
+The output `all_hiddens` is a `[1, 50, 128]` tensor — one 128-dim hidden
+state per position. (The hidden dim is 128, configured in `config.yaml`.)
+
+> **Why GRU instead of just averaging item embeddings?** Because order
+> matters for shopping. Clicking *charger → cable → phone case* signals a
+> different intent than *phone case → charger → cable*. A simple average
+> would lose that order; a GRU preserves it.
+
+#### E. Attention pooling — pick out the important items
+
+The GRU gives us one hidden state per position. We need to **collapse**
+those 50 vectors into a single vector representing the whole session, so
+we can use it to score items.
+
+The naïve way: take just the last hidden state. But that overweights the
+last item.
+
+The better way: a **weighted average**, where the weights come from a
+learned attention mechanism. That's what `SelfAttentionLayer` does.
+
+For our `[1, 50, 128]` hidden states, attention computes:
+
+```
+1. A "query" vector — the mean of the non-PAD hidden states.
+2. For each position, a similarity score between query and that
+   position's hidden state.
+3. Mask out PAD positions (set their scores to -inf) so they get
+   weight 0.
+4. Apply softmax — turn the scores into weights summing to 1.0.
+5. Multiply each hidden state by its weight, then sum:
+       session_repr = Σ (weight_i · hidden_i)
+```
+
+Result:
+```
+session_repr     [1, 128]    ← one summary vector for the whole session
+attn_weights     [1, 50]     ← one weight per position (this is what the
+                                demo's bar chart shows)
+```
+
+The attention weights tell you which past items the model "focused on".
+If the chart shows 70% on item B, 25% on item A, 5% on item C, that's the
+model saying: "B was by far the most useful signal for predicting what's
+next." Equal weights mean it couldn't differentiate.
+
+> "Multi-head" attention (`num_heads = 4` in our config) means the layer
+> does this whole computation 4 times in parallel with different learned
+> projections, then concatenates. Each head can specialise — one might
+> focus on recency, another on category, etc. We only show the average
+> attention weights in the demo for simplicity.
+
+#### F. Score every item — the final dot product
+
+Now we have `session_repr` of shape `[1, 128]` and the **same item
+embedding table** of shape `[vocab_size, 64]`. We need a score per item.
+
+The encoder has a small projection layer that maps the 128-dim session
+vector down to 64-dim (matching the embedding dim). Then it does a single
+matrix multiplication:
+
+```python
+proj_repr = projection(session_repr)               # [1, 64]
+scores    = proj_repr @ item_embeddings.T          # [1, vocab_size]
+```
+
+Each entry `scores[i]` = dot product of the projected session vector with
+item *i*'s embedding. Items whose embeddings point in the same direction
+as the session vector get high scores. Items pointing differently get low
+scores.
+
+Then mask out the special tokens so they can't be recommended:
+```python
+scores[PAD_IDX] = -inf    # PAD is not a real item
+scores[UNK_IDX] = -inf    # UNK isn't either
+```
+
+#### G. Take the top-K
+
+```python
+top_scores, top_ids = torch.topk(scores, k=20)
+```
+
+Returns the 20 highest-scoring item ids and their raw scores. These are
+the model's recommendations. We compare them to the held-out
+`target_id = vocab.encode("B08N5WRWNW")` to compute Recall@5, Recall@10,
+Recall@20, MRR@10, etc.
+
+#### H. End-to-end shape summary
+
+```
+input_ids       [1, 50]       (one batch of one session, 50 padded ids)
+   │
+   ▼   ItemEmbedding  (lookup table  [vocab_size × 64])
+embedded        [1, 50, 64]
+   │
+   ▼   GRU  (input=64, hidden=128)
+all_hiddens     [1, 50, 128]
+   │
+   ▼   SelfAttentionLayer  (4 heads, masked softmax)
+session_repr    [1, 128]
+attn_weights    [1, 50]      (the demo's bar-chart values)
+   │
+   ▼   projection  (Linear 128→64)
+proj_repr       [1, 64]
+   │
+   ▼   dot product with item embeddings  [vocab_size × 64]ᵀ
+scores          [1, vocab_size]   (one number per item, PAD/UNK = -inf)
+   │
+   ▼   torch.topk(k=20)
+top_ids         [20]    top_scores [20]
+```
+
+That's the whole inference path of the GRU + Attention model. Same
+machinery is used during training (with a cross-entropy loss against the
+target id) and during the demo's `/recommend` endpoint.
 
 ### Step 4 — `python demo/app.py`
 

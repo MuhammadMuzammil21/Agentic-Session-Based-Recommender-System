@@ -38,6 +38,11 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%H:%M:%S",
 )
+# Silence the chatty third-party loggers — every HTTP chunk would print
+# otherwise, making it hard to read the tqdm progress bars.
+for noisy in ("httpx", "httpcore", "datasets", "filelock", "fsspec",
+              "huggingface_hub"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

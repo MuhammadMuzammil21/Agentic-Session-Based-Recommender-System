@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 from datasets import load_dataset  # module-level so patch("data.loader.load_dataset") works
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from config.settings import Config
@@ -131,7 +132,14 @@ class AmazonDataLoader:
             raise RuntimeError(f"HuggingFace streaming failed: {exc}") from exc
 
         records = []
-        for item in ds.take(max_records):
+        progress = tqdm(
+            ds.take(max_records),
+            total=max_records,
+            desc="Streaming reviews",
+            unit=" rows",
+            mininterval=0.5,
+        )
+        for item in progress:
             # timestamp is stored as a string of milliseconds in this dataset
             try:
                 ts_ms = int(item.get("timestamp", 0))
@@ -213,16 +221,19 @@ class AmazonDataLoader:
         records: list[dict] = []
         found: set[str] = set()
         target_set = set(target_asins)
+        n_targets = len(target_set)
 
-        for i, row in enumerate(ds.take(max_scanned)):
-            if i and i % 50_000 == 0:
-                logger.info(
-                    "metadata scan: %d records seen, %d/%d ASINs matched",
-                    i,
-                    len(found),
-                    len(target_set),
-                )
+        # The metadata file has ~1.6M rows so we don't know exact length up
+        # front — show records scanned + ASINs matched as the progress signal.
+        progress = tqdm(
+            ds.take(max_scanned),
+            desc="Streaming metadata",
+            unit=" rows",
+            postfix={"matched": f"0/{n_targets}"},
+            mininterval=0.5,
+        )
 
+        for i, row in enumerate(progress):
             try:
                 item = json.loads(row["text"])
             except (json.JSONDecodeError, TypeError):
@@ -247,21 +258,22 @@ class AmazonDataLoader:
                 }
             )
             found.add(parent_asin)
+            progress.set_postfix(matched=f"{len(found)}/{n_targets}")
 
-            if len(found) >= len(target_set):
-                logger.info(
-                    "metadata scan complete: all %d target ASINs found at record %d",
-                    len(target_set),
-                    i + 1,
+            if len(found) >= n_targets:
+                progress.write(
+                    f"metadata scan complete — all {n_targets} ASINs found "
+                    f"after scanning {i + 1:,} records"
                 )
                 break
 
+        progress.close()
         df = pd.DataFrame(records, columns=["item_id", "title", "description", "category", "price"])
-        missing = len(target_set) - len(found)
+        missing = n_targets - len(found)
         logger.info(
             "Item metadata: %d/%d ASINs joined (%d missing — will fall back to ASIN string)",
             len(found),
-            len(target_set),
+            n_targets,
             missing,
         )
         return df
