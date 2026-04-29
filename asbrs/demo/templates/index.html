@@ -208,16 +208,16 @@
     <!-- LEFT PANEL: Session Input -->
     <section class="panel">
       <h2>Your Session</h2>
-      <p style="font-size:0.85rem; color:#64748b; margin-bottom:0.5rem;">Enter item titles (one per line):</p>
-      <textarea id="session-input" placeholder="Wired Gaming Mouse&#10;Mechanical Keyboard Blue Switches&#10;Large Mouse Pad"></textarea>
+      <p style="font-size:0.85rem; color:#64748b; margin-bottom:0.5rem;">Enter ASINs (one per line):</p>
+      <textarea id="session-input" placeholder="B00MCW7G9M&#10;B07SM135LS&#10;B08N5WRWNW"></textarea>
       <button id="recommend-btn" onclick="getRecommendations()">Get Recommendations</button>
 
       {% if example_sessions %}
       <div class="examples-container">
         <h3>Example Sessions (from test set)</h3>
         <p style="font-size:0.75rem; color:#94a3b8; margin-bottom:0.5rem;">
-          Each session has a held-out next item — clicking loads the inputs and
-          shows you what the model should ideally predict.
+          Each session has a held-out next ASIN — clicking loads the inputs
+          and shows you what the model should ideally predict.
         </p>
         {% for session in example_sessions %}
         <button class="example-btn"
@@ -226,7 +226,7 @@
                 data-target="{{ session.target | e }}">
           <div>Session {{ loop.index }} ({{ session.input|length }} items)</div>
           <div style="font-size:0.7rem; color:#64748b; margin-top:0.25rem;">
-            Actual next: <em>{{ session.target[:60] }}{% if session.target|length > 60 %}…{% endif %}</em>
+            Actual next: <code>{{ session.target }}</code>
           </div>
         </button>
         {% endfor %}

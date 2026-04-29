@@ -1,15 +1,13 @@
 """scripts/evaluate.py — Evaluate the trained GRU + Attention model.
 
-Runs the trained SessionEncoder on the test set, computes Recall@K, MRR@K
-and HitRate@K for the configured K values, prints a single-row results
-table, saves it as CSV / Markdown, and writes a human-evaluation HTML sheet
-populated with real top-5 predictions from the model.
+Runs the trained SessionEncoder on the test set, computes Recall@K,
+MRR@K, and HitRate@K for the configured K values, prints a single-row
+results table, and saves it as CSV / Markdown.
 
 Usage
 -----
     python scripts/evaluate.py [--checkpoint checkpoints/best.pt]
                                [--config config/config.yaml]
-                               [--n-human 10]
                                [--output-dir evaluation]
 """
 
@@ -27,10 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import torch
 
-from agent.interfaces import IntentResult, RecommendationOutput
 from config.settings import Config
 from data.vocab import PAD_IDX, UNK_IDX, Vocabulary
-from evaluation.human_eval import HumanEvalExporter
 from evaluation.metrics import evaluate_model
 from models.encoder import SessionEncoder
 
@@ -71,19 +67,6 @@ def _load_test_sessions(processed_dir: Path) -> list:
         sessions = pickle.load(fh)
     logger.info("Loaded %d test sessions", len(sessions))
     return sessions
-
-
-def _load_item_metadata(processed_dir: Path) -> pd.DataFrame:
-    path = processed_dir / "item_metadata.pkl"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"item_metadata.pkl not found in {processed_dir}. "
-            "Run scripts/download_data.py first."
-        )
-    with path.open("rb") as fh:
-        df = pickle.load(fh)
-    logger.info("Item metadata loaded: %d rows", len(df))
-    return df
 
 
 def _find_best_checkpoint(checkpoint_dir: Path) -> Path | None:
@@ -131,8 +114,8 @@ def _score_session(
     seed_int: list[int],
     max_len: int,
     top_k: int,
-) -> tuple[list[int], list[float]]:
-    """Encode one session and return top-K (item_ids, raw_scores)."""
+) -> list[int]:
+    """Encode one session and return top-K item ids."""
     if len(seed_int) >= max_len:
         padded = seed_int[-max_len:]
         true_len = max_len
@@ -150,8 +133,8 @@ def _score_session(
         )[0]
         scores[PAD_IDX] = float("-inf")
         scores[UNK_IDX] = float("-inf")
-        top_scores, top_ids = torch.topk(scores, k=top_k)
-    return top_ids.tolist(), top_scores.tolist()
+        top_ids = torch.topk(scores, k=top_k).indices
+    return top_ids.tolist()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -160,11 +143,9 @@ def _score_session(
 def main(
     checkpoint: str | None = None,
     config_path: str = "config/config.yaml",
-    n_human: int = 10,
     output_dir: str = "evaluation",
 ) -> None:
     """Evaluate the trained GRU + Attention model on the test set."""
-    # 1. Load artefacts.
     cfg = _load_config(config_path)
     processed_dir = Path(cfg.data.processed_dir)
     output_path = Path(output_dir)
@@ -173,16 +154,7 @@ def main(
     vocab = _load_vocab(processed_dir)
     test_sessions_raw = _load_test_sessions(processed_dir)
     test_sessions = _sessions_to_asin_lists(test_sessions_raw)
-    item_metadata = _load_item_metadata(processed_dir)
 
-    asin_to_title = dict(
-        zip(
-            item_metadata["item_id"].astype(str),
-            item_metadata["title"].fillna("").astype(str),
-        )
-    )
-
-    # 2. Resolve checkpoint.
     ckpt_dir = Path(cfg.training.checkpoint_dir)
     ckpt_path = Path(checkpoint) if checkpoint else _find_best_checkpoint(ckpt_dir)
     if ckpt_path and ckpt_path.exists():
@@ -191,63 +163,24 @@ def main(
         print("[evaluate] No checkpoint found — running with random weights.")
         ckpt_path = None
 
-    # 3. Build encoder.
     encoder = _build_encoder(cfg, vocab_size=len(vocab), ckpt_path=ckpt_path)
     max_len = cfg.model.max_seq_len
     k_values = cfg.evaluation.k_values
     max_k = max(k_values)
 
-    # 4. Score every test session and collect (top_ids, ground_truth).
     print("\n[evaluate] Scoring test sessions with GRU + Attention …")
     predictions: list[tuple[list[int], int]] = []
-    real_recs: list[list[RecommendationOutput]] = []
-    real_intents: list[IntentResult] = []
-    display_sessions: list[list[str]] = []
-
     for session in test_sessions:
         seed_strs = session[:-1]
         target_asin = session[-1]
         seed_int = [vocab.encode(a) for a in seed_strs]
         gt_idx = vocab.encode(target_asin)
 
-        top_ids, top_scores = _score_session(encoder, seed_int, max_len, max_k)
+        top_ids = _score_session(encoder, seed_int, max_len, max_k)
         predictions.append((top_ids, gt_idx))
 
-        # For the human-eval HTML — keep only the first 5 with real titles.
-        recs: list[RecommendationOutput] = []
-        for rank_idx, (item_id, score) in enumerate(
-            zip(top_ids[:5], top_scores[:5])
-        ):
-            asin = vocab.decode(item_id)
-            title = asin_to_title.get(asin, asin) or asin
-            recs.append(
-                RecommendationOutput(
-                    rank=rank_idx + 1,
-                    item_id=item_id,
-                    item_title=title,
-                    final_score=float(score),
-                    explanation=(
-                        "Top-ranked by GRU+Attention score for your session."
-                    ),
-                )
-            )
-        real_recs.append(recs)
-
-        session_titles = [asin_to_title.get(a, a) or a for a in seed_strs]
-        display_sessions.append(session_titles)
-        real_intents.append(
-            IntentResult(
-                intent_summary=" ".join(session_titles[:3]),
-                top_items=session_titles[:3],
-                confidence=1.0,
-                keywords=[],
-            )
-        )
-
-    # 5. Compute metrics.
     metrics = evaluate_model(predictions, k_values)
 
-    # 6. Print and save the metrics row.
     row = {"Model": "GRU + Attention"}
     for k in k_values:
         row[f"Recall@{k}"] = metrics.get(f"Recall@{k}", float("nan"))
@@ -272,20 +205,6 @@ def main(
     )
     print(f"[evaluate] Results saved to {csv_path}")
     print(f"[evaluate] Markdown saved to {md_path}")
-
-    # 7. Generate the human-eval HTML sheet.
-    print("[evaluate] Generating human evaluation sheet …")
-    html_path = output_path / "human_eval_sheet.html"
-    exporter = HumanEvalExporter(output_path=html_path, seed=cfg.project.seed)
-    exporter.generate_eval_sheet(
-        sessions=display_sessions,
-        recommendations=real_recs,
-        intents=real_intents,
-        n_sessions=n_human,
-    )
-    print(f"[evaluate] Human eval sheet written to {html_path}")
-
-    # 8. Final summary line.
     print(
         f"\nDone. Recall@10 = {metrics.get('Recall@10', float('nan')):.4f}"
         f"  ·  MRR@10 = {metrics.get('MRR@10', float('nan')):.4f}"
@@ -312,13 +231,6 @@ if __name__ == "__main__":
         help="Path to config.yaml (default: config/config.yaml).",
     )
     parser.add_argument(
-        "--n-human",
-        type=int,
-        default=10,
-        dest="n_human",
-        help="Number of sessions in the human eval sheet (default: 10).",
-    )
-    parser.add_argument(
         "--output-dir",
         type=str,
         default="evaluation",
@@ -329,6 +241,5 @@ if __name__ == "__main__":
     main(
         checkpoint=args.checkpoint,
         config_path=args.config_path,
-        n_human=args.n_human,
         output_dir=args.output_dir,
     )

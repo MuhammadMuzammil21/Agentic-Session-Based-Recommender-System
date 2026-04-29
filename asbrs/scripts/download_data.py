@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -107,62 +106,6 @@ def main(cfg: Config) -> None:
 
     # ── 2. Filter interactions ─────────────────────────────────────────────────
     df = loader.filter_interactions(df, min_item_freq=cfg.data.min_item_freq)
-
-    # ── 2b. Fetch real product metadata from raw_meta_Electronics ─────────────
-    # The reviews dataset is keyed by `asin` (child variant: e.g. shirt-size-M).
-    # The metadata file is keyed by `parent_asin` (the umbrella product).
-    # We join via parent_asin and fan results back out to every child asin
-    # in our vocabulary.
-    asin_to_parent = (
-        df.drop_duplicates("item_id")
-          .set_index("item_id")["parent_asin"]
-          .astype(str)
-          .to_dict()
-    )
-    parent_asins = set(asin_to_parent.values())
-    logger.info(
-        "Metadata join: %d unique asins → %d unique parent_asins",
-        len(asin_to_parent),
-        len(parent_asins),
-    )
-
-    parent_meta = loader.stream_item_metadata(
-        category=cfg.data.hf_category_meta,
-        target_asins=parent_asins,
-    )
-    parent_meta_indexed = parent_meta.set_index("item_id")
-
-    # Build per-asin metadata: each child asin gets its parent's row.
-    records = []
-    matched = 0
-    for asin, parent in asin_to_parent.items():
-        if parent in parent_meta_indexed.index:
-            row = parent_meta_indexed.loc[parent]
-            records.append({
-                "item_id":     asin,
-                "title":       str(row["title"]),
-                "description": str(row["description"]),
-                "category":    str(row["category"]),
-                "price":       row["price"],
-            })
-            matched += 1
-        else:
-            records.append({
-                "item_id":     asin,
-                "title":       asin,
-                "description": "",
-                "category":    "",
-                "price":       None,
-            })
-
-    item_metadata = pd.DataFrame(records)
-    logger.info(
-        "Item metadata: %d/%d asins resolved to real titles (%d fell back to ASIN)",
-        matched,
-        len(asin_to_parent),
-        len(asin_to_parent) - matched,
-    )
-    _save_pickle(item_metadata, processed_dir / "item_metadata.pkl")
 
     # ── 3. Build sessions ──────────────────────────────────────────────────────
     sb = SessionBuilder()

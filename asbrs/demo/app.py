@@ -45,9 +45,6 @@ app = Flask(__name__)
 _cache: Dict[str, Any] = {
     "cfg": None,
     "vocab": None,
-    "item_metadata": None,
-    "title_to_asin": None,
-    "asin_to_title": None,
     "encoder": None,
     "example_sessions": None,
 }
@@ -68,28 +65,6 @@ def _load_vocab(processed_dir: Path) -> Vocabulary:
     if not vocab_path.exists():
         raise FileNotFoundError(f"Vocabulary not found: {vocab_path}")
     return Vocabulary.load(vocab_path)
-
-
-def _load_item_metadata(processed_dir: Path) -> pd.DataFrame:
-    """Load item metadata DataFrame, padding any missing optional columns."""
-    for name in ("item_metadata.pkl", "item_metadata.csv"):
-        path = processed_dir / name
-        if not path.exists():
-            continue
-        if name.endswith(".pkl"):
-            with path.open("rb") as fh:
-                df = pickle.load(fh)
-        else:
-            df = pd.read_csv(path)
-        # ContentBasedFilter.fit() requires these 5 columns.
-        for col in ("title", "description", "category", "price"):
-            if col not in df.columns:
-                df[col] = ""
-        return df
-    raise FileNotFoundError(
-        f"No item metadata found in {processed_dir} "
-        "(expected item_metadata.pkl or item_metadata.csv)"
-    )
 
 
 def _load_encoder(
@@ -152,24 +127,22 @@ def _load_encoder(
 
 def _sample_example_sessions(
     test_sessions: List[Any],
-    asin_to_title: Dict[str, str],
     n: int = 5,
     seed: int = 42,
 ) -> List[Dict[str, Any]]:
-    """Sample n sessions from test set with held-out targets for verification.
+    """Sample n sessions from the test set with held-out targets.
 
-    Each example carries both the *input* (items[:-1]) and the *target*
-    (the leave-one-out held-out item) so the demo can show "actual next item"
-    next to predictions.
+    Each example carries the input ASINs (items[:-1]) and the held-out
+    target ASIN (item[-1]) so the demo can show "actual next item" next to
+    predictions.
 
     Args:
         test_sessions: Session objects or plain lists.
-        asin_to_title: ASIN → title mapping.
-        n: Number of sessions to sample.
+        n:    Number of sessions to sample.
         seed: Random seed for reproducibility.
 
     Returns:
-        List of dicts: {"input": [titles...], "target": title_str}.
+        List of dicts: {"input": [asins...], "target": asin_str}.
     """
     random.seed(seed)
     valid: List[Dict[str, Any]] = []
@@ -177,11 +150,9 @@ def _sample_example_sessions(
         item_strs = s.item_ids if hasattr(s, "item_ids") else list(s)
         if len(item_strs) < 4:  # need ≥3 inputs + 1 target
             continue
-        seed_asins = item_strs[:-1]
-        target_asin = item_strs[-1]
         valid.append({
-            "input": [asin_to_title.get(a, a) for a in seed_asins],
-            "target": asin_to_title.get(target_asin, target_asin),
+            "input": list(item_strs[:-1]),
+            "target": item_strs[-1],
         })
 
     return random.sample(valid, min(n, len(valid)))
@@ -211,16 +182,6 @@ def load_components() -> None:
     vocab = _load_vocab(processed_dir)
     _cache["vocab"] = vocab
 
-    # ── Item metadata ─────────────────────────────────────────────────────────
-    df = _load_item_metadata(processed_dir)
-    _cache["item_metadata"] = df
-    _cache["title_to_asin"] = dict(
-        zip(df["title"].astype(str), df["item_id"].astype(str))
-    )
-    _cache["asin_to_title"] = dict(
-        zip(df["item_id"].astype(str), df["title"].astype(str))
-    )
-
     # ── Encoder ───────────────────────────────────────────────────────────────
     pts = sorted(ckpt_dir.glob("epoch_*.pt"))
     if not pts:
@@ -235,7 +196,6 @@ def load_components() -> None:
             test_sessions = pickle.load(fh)
         _cache["example_sessions"] = _sample_example_sessions(
             test_sessions,
-            _cache["asin_to_title"],
             n=5,
             seed=cfg.project.seed,
         )
@@ -275,13 +235,13 @@ def recommend():
     """Run the full ASBRS recommendation pipeline for a given session.
 
     Accepts JSON:
-        {"session_items": ["Wireless Mouse", "Mechanical Keyboard", ...]}
+        {"session_items": ["B00MCW7G9M", "B07SM135LS", ...]}   # ASINs
 
     Returns JSON:
         {
-          "recommendations": [...card dicts...],
-          "attention_heatmap": {"labels": [...], "values": [...]},
-          "intent": "exploring gaming peripherals"
+          "recommendations": [...card dicts (ASINs as titles)...],
+          "attention_heatmap": {"labels": [...ASINs...], "values": [...]},
+          "intent": "GRU + Attention scoring"
         }
 
     On error returns {"error": "..."} with HTTP 400.
@@ -293,20 +253,17 @@ def recommend():
             load_components()
 
         data = request.get_json(force=True)
-        session_titles: List[str] = data.get("session_items", [])
-        if not isinstance(session_titles, list) or not session_titles:
+        session_asins: List[str] = data.get("session_items", [])
+        if not isinstance(session_asins, list) or not session_asins:
             return jsonify({"error": "session_items must be a non-empty list"}), 400
 
         cfg: Config = _cache["cfg"]
         vocab: Vocabulary = _cache["vocab"]
         encoder: SessionEncoder = _cache["encoder"]
-        title_to_asin: Dict[str, str] = _cache["title_to_asin"]
-        asin_to_title: Dict[str, str] = _cache["asin_to_title"]
 
-        logger.info("/recommend: session_len=%d", len(session_titles))
+        logger.info("/recommend: session_len=%d", len(session_asins))
 
-        # Step 1 — encode titles → integer IDs via vocab
-        session_asins = [title_to_asin.get(t, t) for t in session_titles]
+        # Step 1 — encode ASINs → integer ids via the vocabulary.
         seed_int = [vocab.encode(a) for a in session_asins]
 
         # Step 2 — run SessionEncoder.forward()
@@ -347,21 +304,19 @@ def recommend():
 
         attn_weights_all: List[float] = attn_weights_batch[0].tolist()
         valid_attn = attn_weights_all[-true_len:]
-        valid_titles = session_titles[-true_len:]
+        valid_labels = session_asins[-true_len:]
 
-        # Step 4 — build RecommendationOutput objects from top-K.
+        # Step 4 — build RecommendationOutput objects from top-K (ASINs as titles).
         outputs: List[RecommendationOutput] = []
         for rank_idx, (item_id, score, prob) in enumerate(
             zip(top_ids.tolist(), top_scores.tolist(), top_probs.tolist())
         ):
             asin = vocab.decode(item_id)
-            title = asin_to_title.get(asin, asin) or asin
-            # final_score = softmax probability within top-K (sums to 1.0).
             outputs.append(
                 RecommendationOutput(
                     rank=rank_idx + 1,
                     item_id=item_id,
-                    item_title=title,
+                    item_title=asin,
                     final_score=float(prob),
                     explanation=(
                         f"Raw GRU+Attention score: {score:+.2f}. "
@@ -373,7 +328,7 @@ def recommend():
 
         # Step 5 — serialise and return
         cards = AttentionVisualizer.recommendation_cards(outputs)
-        heatmap = AttentionVisualizer.heatmap_data(valid_titles, valid_attn)
+        heatmap = AttentionVisualizer.heatmap_data(valid_labels, valid_attn)
 
         elapsed = time.time() - t_start
         logger.info("/recommend: done in %.3f s — %d recs", elapsed, len(cards))
@@ -381,7 +336,7 @@ def recommend():
         return jsonify({
             "recommendations": cards,
             "attention_heatmap": heatmap,
-            "intent": "GRU + Attention scoring (no intent layer)",
+            "intent": "GRU + Attention scoring",
         })
 
     except ValueError as exc:

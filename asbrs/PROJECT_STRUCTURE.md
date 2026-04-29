@@ -56,8 +56,8 @@ asbrs/
 ├── scripts/         CLI entry points (download, train, evaluate, smoke)
 ├── tests/           pytest unit tests
 ├── checkpoints/     saved model weights
-├── data/processed/  preprocessed pickles + vocab.json + item_metadata.pkl
-├── evaluation/      output: results.csv/md, human_eval_sheet.html
+├── data/processed/  preprocessed pickles + vocab.json
+├── evaluation/      output: results.csv, results.md
 └── requirements.txt
 ```
 
@@ -75,7 +75,7 @@ This is where raw Amazon reviews become tensors the model can train on.
 | File | What it does |
 |---|---|
 | `interfaces.py` | Two small dataclasses: `Session` (a user + their list of items) and `EncodedSession` (the same thing but as integer ids, ready for the model). |
-| `loader.py` | `AmazonDataLoader` — connects to HuggingFace and streams the raw review JSONL file row by row. Also has a method to fetch real product titles from the metadata file. |
+| `loader.py` | `AmazonDataLoader` — connects to HuggingFace and streams the raw review JSONL file row by row, with a tqdm progress bar. |
 | `session_builder.py` | `SessionBuilder` — groups raw rows by user, splits them into sessions whenever the gap between clicks is longer than 24 hours, then filters short/long sessions and splits into train/val/test. |
 | `preprocessor.py` | `SessionPreprocessor` — takes Session objects, looks up integer ids via the vocabulary, pads them to a fixed length, and wraps them in a PyTorch DataLoader (which feeds the model in batches). |
 | `vocab.py` | `Vocabulary` — the ASIN ↔ integer mapping. Built only from training items, saved as `vocab.json`. |
@@ -90,7 +90,6 @@ After running `download_data.py` you'll see new files inside `data/processed/`:
 | `test_sessions.pkl` | Same, held out for final evaluation. |
 | `encoded_train.pkl` | Training sessions already converted to integer ids and padded. |
 | `encoded_val.pkl` / `encoded_test.pkl` | Same for val/test. |
-| `item_metadata.pkl` | DataFrame with real product titles, descriptions, categories — used by the demo and human-eval HTML for human-readable display. |
 
 ### `models/` — the neural network
 
@@ -105,7 +104,6 @@ After running `download_data.py` you'll see new files inside `data/processed/`:
 | File | What it does |
 |---|---|
 | `metrics.py` | Pure functions: `recall_at_k`, `mrr_at_k`, `hit_rate_at_k`, plus a batch helper `evaluate_model` that averages them across many sessions. |
-| `human_eval.py` | `HumanEvalExporter` — writes a self-contained HTML page where humans can rate the model's recommendations on a 5-star scale. |
 
 After running `evaluate.py` you'll see:
 
@@ -113,13 +111,12 @@ After running `evaluate.py` you'll see:
 |---|---|
 | `evaluation/results.csv` | The metrics row for the trained model, machine-readable. |
 | `evaluation/results.md` | Same row as Markdown — paste into `README.md`. |
-| `evaluation/human_eval_sheet.html` | Standalone HTML for human raters; shows N test sessions with the model's top-5 picks and a star widget. |
 
 ### `demo/` — the Flask web app
 
 | File | What it does |
 |---|---|
-| `app.py` | The Flask server. On startup it loads the trained encoder + vocab + item metadata. Has two routes: `GET /` serves the HTML page, `POST /recommend` runs the model and returns top-K JSON. |
+| `app.py` | The Flask server. On startup it loads the trained encoder and vocabulary. Has two routes: `GET /` serves the HTML page, `POST /recommend` accepts a list of ASINs and returns the top-K predicted ASINs as JSON. |
 | `visualizer.py` | Small helpers that turn `RecommendationOutput` objects and attention weights into JSON the frontend can render (recommendation cards + bar-chart data). |
 | `templates/index.html` | Single-page UI with three panels: session input (left), recommendations (centre), attention chart (right). Plain HTML + vanilla JavaScript — no React, no build step. |
 
@@ -155,51 +152,25 @@ This script does seven things in sequence (see `download_data.py:main()`):
    a streaming connection to the Amazon Reviews 2023 dataset and pulls up to
    `max_streaming_records` rows (default 500 000) into a pandas DataFrame.
    No file is saved to disk during this — it's a live HTTP stream.
-   Each row has fields like `user_id`, `asin`, `parent_asin`, `rating`,
-   `timestamp`, plus the *review's* title and body.
+   Each row has fields like `user_id`, `asin`, `rating`, `timestamp` —
+   exactly what we need to know "who clicked what, when".
 
 2. **Drop rare items.** `filter_interactions()` removes any item that appears
    fewer than `min_item_freq` times (default 15). Rare items are noise — the
    model can't learn meaningful embeddings for items it sees once or twice.
 
-3. **Fetch product metadata.** A second HuggingFace stream pulls product
-   *titles* and *descriptions* from the `meta_Electronics.jsonl` file. The
-   reviews dataset is keyed by `asin` (child variant) but metadata is keyed by
-   `parent_asin` (umbrella product), so we look up each child's parent and
-   fan the metadata back out. Result is saved as `data/processed/item_metadata.pkl`.
-
-   Imagine this is your reviews data
-   user_id | asin | parent_asin
-   --------------------------------
-   U1      | A1   | P100
-   U2      | A2   | P100
-   U3      | A3   | P200
-
-   And this is your metadata data
-   parent_asin | title
-   -------------------------
-   P100        | Sony Headphones
-   P200        | Dell Laptop
-
-   You expand metadata so every asin gets it, metadata attached to every asin:
-   asin | parent_asin | title
-   --------------------------------
-   A1   | P100        | Sony Headphones
-   A2   | P100        | Sony Headphones
-   A3   | P200        | Dell Laptop
-
-4. **Build sessions.** `SessionBuilder.build_sessions()` sorts each user's
+3. **Build sessions.** `SessionBuilder.build_sessions()` sorts each user's
    rows by timestamp, then walks through them and starts a new session
    whenever the gap is longer than 24 hours. Each session is one `Session`
    object: `{user_id, item_ids, timestamps}`.
 
-5. **Filter sessions.** Drop sessions that are too short (< 3 items, no
+4. **Filter sessions.** Drop sessions that are too short (< 3 items, no
    prediction signal) or too long (> 50 items, probably bots).
 
-6. **Split into train / val / test.** Random shuffle with seed=42, then
+5. **Split into train / val / test.** Random shuffle with seed=42, then
    80% / 10% / 10%. Saved as three pickle files.
 
-7. **Build the vocabulary** (only from training items, no leakage), then
+6. **Build the vocabulary** (only from training items, no leakage), then
    **encode** each session using leave-one-out:
    - `input_ids` = all items except the last, padded on the LEFT to length 50
    - `target_id` = the last item (held out for prediction)
@@ -249,14 +220,13 @@ Training complete.
 ### Step 3 — `python scripts/evaluate.py`
 
 This script runs the **trained GRU + Attention model** on the held-out
-test set, reports the metrics, and writes a human-evaluation HTML page.
-
-Single-model evaluation — no comparison table, no baselines, no LLM. Just
-the model you built scored honestly on data it has never seen.
+test set and reports the metrics. Single-model evaluation — no comparison
+table, no baselines. Just the model you built scored honestly on data it
+has never seen.
 
 #### What happens, top to bottom
 
-1. Load `vocab.json`, `test_sessions.pkl`, and `item_metadata.pkl`.
+1. Load `vocab.json` and `test_sessions.pkl`.
 2. Auto-pick the highest-recall checkpoint from `checkpoints/`.
 3. Build a `SessionEncoder` and load the checkpoint weights.
 4. For every one of the test sessions, run the encoder forward pass and
@@ -266,8 +236,6 @@ the model you built scored honestly on data it has never seen.
    `evaluation/metrics.py:evaluate_model`, which averages Recall@K, MRR@K
    and HitRate@K across all sessions.
 6. Print and save a one-row results table.
-7. Generate `human_eval_sheet.html` with 10 random sessions and the
-   model's real top-5 picks for each.
 
 #### Example console output
 
@@ -296,11 +264,11 @@ Done. Recall@10 = 0.0423  ·  MRR@10 = 0.0206
   correct answer (true here). Kept for completeness.
 
 These numbers will look small in absolute terms (a few percent). That's
-normal for a small dataset — the model has 6,988 items to choose from per
-session and only ~6 training examples per item. With a million-session
-dataset on the same architecture, papers typically report Recall@10 in the
-0.10–0.25 range. What matters is that the model **beats random chance by a
-clear margin** (random top-10 would be 10/6988 ≈ 0.0014).
+normal for a small dataset — the model has thousands of items to choose
+from per session and only a handful of training examples per item. With a
+million-session dataset on the same architecture, papers typically report
+Recall@10 in the 0.10–0.25 range. What matters is that the model **beats
+random chance by a clear margin** (random top-10 would be ~10/vocab_size).
 
 #### Files written to `evaluation/`
 
@@ -308,7 +276,6 @@ clear margin** (random top-10 would be 10/6988 ≈ 0.0014).
 |---|---|
 | `results.csv` | One-row CSV with every metric. |
 | `results.md` | Same, as Markdown — paste into `README.md`. |
-| `human_eval_sheet.html` | 10 random test sessions with the model's real top-5 predictions and a 5-star rating widget. Open it in a browser to qualitatively check whether recommendations feel sensible. |
 
 ---
 
@@ -514,7 +481,7 @@ target id) and during the demo's `/recommend` endpoint.
 The Flask demo wires everything for an interactive browser experience.
 
 On startup (`load_components()`):
-1. Loads vocab, item metadata, and the best checkpoint.
+1. Loads the vocabulary and the best trained checkpoint.
 2. Samples 5 random test sessions to use as one-click examples (each
    includes the held-out target item so you can verify predictions).
 
@@ -526,9 +493,9 @@ When a user submits a session via the UI (`POST /recommend`):
    already in the user's session.
 5. Take the top-20. Apply softmax over those 20 scores so they become
    readable probabilities (summing to 1.0).
-6. Look up each top-20 item's integer id in the vocab → ASIN → product title.
+6. Decode each top-20 integer id back to its ASIN string via the vocabulary.
 7. Build a JSON response with three pieces:
-   - `recommendations`: list of cards (rank, title, percent score, explanation)
+   - `recommendations`: list of cards (rank, ASIN, percent score, explanation)
    - `attention_heatmap`: per-input-item attention weights (the bar chart)
    - `intent`: a short label string identifying the scoring method
 
@@ -555,7 +522,7 @@ these in order:
 2. **`scripts/download_data.py`** — the data pipeline as a linear story.
 3. **`models/encoder.py`** — the entire neural network in ~200 lines.
 4. **`scripts/train.py`** — the training loop.
-5. **`evaluation/ablation.py`** — how the three variants are compared.
+5. **`scripts/evaluate.py`** — how the test-set metrics are computed.
 6. **`demo/app.py`** — the inference path used by the demo.
 
 The rest of the codebase is helpers and tests.
@@ -564,15 +531,16 @@ The rest of the codebase is helpers and tests.
 
 ## 6. Common questions
 
-**Q: Does the model use product titles when training?**
-No. The model only sees integer ids. Titles are purely for displaying things
-to humans (the demo and the human-eval HTML).
+**Q: What does the model actually see?**
+Integer ids only. Each ASIN string gets mapped to a small integer via the
+vocabulary, the model trains on those integers, and at inference we decode
+the predicted integer ids back to ASIN strings to display.
 
 **Q: Why do scores in the demo look like "10.0%" instead of probabilities like 0.05?**
 We softmax-normalise the top-20 raw scores so they sum to 1.0, then display
 as a percentage. So 10.0% means *"of the model's preference among the top
 20 candidates, 10% goes to this one."* It's not the probability over the
-full 6 988 vocabulary — that would be tiny and meaningless.
+full vocabulary — that would be tiny and meaningless.
 
 **Q: Why does the attention chart sometimes show equal weights?**
 Because the attention layer hasn't found a strong differential signal in
