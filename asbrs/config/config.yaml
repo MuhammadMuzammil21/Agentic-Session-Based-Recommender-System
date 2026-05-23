@@ -11,7 +11,7 @@ data:
   hf_dataset_name: "McAuley-Lab/Amazon-Reviews-2023"
   hf_category_reviews: "raw_review_Electronics"
   hf_category_meta: "raw_meta_Electronics"
-  max_streaming_records: 500000   # adjust based on RAM
+  max_streaming_records: 2000000   # adjust based on RAM
   min_session_len: 3
   max_session_len: 50
   session_window_hours: 24
