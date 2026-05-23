@@ -114,43 +114,89 @@ class SessionEncoder(nn.Module):
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Encode a batch of padded item sequences.
 
+        This is the heart of the model — it walks a session through:
+          (1) item-id → 64-number embedding lookup
+          (2) the GRU, which reads items left→right and updates a memory
+              vector at each step
+          (3) the attention layer, which weighted-averages all GRU
+              memories into ONE summary vector representing the session
+
         Args:
-            input_ids: LongTensor [B, L] — left-padded item indices.
-            lengths:   LongTensor [B]    — true sequence length per sample.
+            input_ids: LongTensor [B, L] — batch of B sessions, each L=50
+                       integer item ids. Older items at the LEFT (padded
+                       with 0s), most recent at the RIGHT.
+            lengths:   LongTensor [B]    — true (non-PAD) length of each
+                       session in the batch.
 
         Returns:
-            session_repr:  FloatTensor [B, H] — final session representation.
-            attn_weights:  FloatTensor [B, L] — per-token attention weights.
-            all_hiddens:   FloatTensor [B, L, H] — all GRU hidden states.
+            session_repr:  FloatTensor [B, H] — one 128-number summary per
+                           session. This is the "memory of the whole
+                           shopping visit" used to score items.
+            attn_weights:  FloatTensor [B, L] — how much the attention
+                           layer focused on each of the L positions.
+                           Sums to 1.0 over real (non-PAD) positions.
+            all_hiddens:   FloatTensor [B, L, H] — the GRU's memory vector
+                           at every step (kept for debugging / future use).
         """
+        # B = batch size (how many sessions we're processing at once)
+        # L = sequence length (always 50 here — the padded length)
         B, L = input_ids.shape
 
-        # 1. Embed
-        embedded = self.item_embedding(input_ids)          # [B, L, D]
+        # ── STEP 1: turn integer ids into embedding vectors ───────────────────
+        # input_ids is just integers like [[0, 0, ..., 17, 42, 88], ...].
+        # ItemEmbedding looks each integer up in its [vocab_size × 64] table
+        # and replaces it with the row of 64 numbers stored at that index.
+        # After this line we have one 64-number vector per item position.
+        embedded = self.item_embedding(input_ids)          # [B, L, D] = [B, 50, 64]
 
-        # 2. Pack padded sequence (lengths must be on CPU for pack_padded_sequence)
-        lengths_cpu = lengths.clamp(min=1).cpu()
+        # ── STEP 2: tell PyTorch to skip PAD positions when running the GRU ───
+        # `pack_padded_sequence` is an optimisation: instead of feeding all 50
+        # positions (most of which are zeros / PAD), we tell the GRU
+        # "this session only has `lengths[i]` real items at the END; ignore
+        # the leading PAD tokens." That's both faster AND keeps the PAD tokens
+        # from polluting the GRU's hidden state.
+        lengths_cpu = lengths.clamp(min=1).cpu()  # pack_padded needs CPU tensor
         packed = nn.utils.rnn.pack_padded_sequence(
             embedded,
             lengths_cpu,
             batch_first=True,
-            enforce_sorted=False,
+            enforce_sorted=False,  # we don't pre-sort by length
         )
 
-        # 3. GRU
+        # ── STEP 3: the GRU walks the sequence and updates its memory ────────
+        # The GRU starts with a zero "memory vector" (hidden state) of size 128.
+        # It reads the first item, mixes it with the zero memory → memory v1.
+        # It reads the second item, mixes it with memory v1     → memory v2.
+        # …and so on. Each step's output is one 128-number memory snapshot.
+        # `packed_out` contains all those snapshots. The `_` we discard is just
+        # the final hidden state (we don't need it — attention uses all snapshots).
         packed_out, _ = self.gru(packed)
+
+        # Unpack: restore the [B, 50, 128] shape (PAD positions get zero filler).
+        # all_hiddens[b, t, :] = GRU's memory vector at position t for session b.
         all_hiddens, _ = nn.utils.rnn.pad_packed_sequence(
             packed_out,
             batch_first=True,
             total_length=L,
-        )                                                  # [B, L, H]
+        )                                                  # [B, L, H] = [B, 50, 128]
+
+        # Standard regularisation — randomly zero some values to prevent overfitting.
         all_hiddens = self.dropout(all_hiddens)
 
-        # 4. Build padding mask: 1 for real tokens, 0 for PAD
-        # input_ids != padding_idx accounts for left-padding
+        # ── STEP 4: build a mask telling attention which positions are real ──
+        # mask[b, t] = 1.0 if position t in session b is a real item, 0.0 if PAD.
+        # The attention layer uses this so PAD positions get zero weight.
         mask = (input_ids != self.padding_idx).float()    # [B, L]
 
-        # 5. Attention pooling
+        # ── STEP 5: attention pools the 50 memory vectors into ONE summary ───
+        # The GRU gave us 50 memory snapshots per session. We need ONE vector
+        # to represent the whole session for scoring. Attention does this as a
+        # *learned* weighted average: it decides which snapshots are most
+        # informative and weights them more heavily.
+        # Returns:
+        #   session_repr [B, H]  — the one 128-number session summary.
+        #   attn_weights [B, L]  — how much each input position contributed,
+        #                          shown as the bar chart in the demo UI.
         session_repr, attn_weights = self.attention(all_hiddens, mask)
 
         return session_repr, attn_weights, all_hiddens

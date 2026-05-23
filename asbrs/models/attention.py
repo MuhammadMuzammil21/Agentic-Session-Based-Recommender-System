@@ -94,60 +94,125 @@ class SelfAttentionLayer(nn.Module):
         hidden_states: Tensor,
         mask: Tensor,
     ) -> Tuple[Tensor, Tensor]:
-        """Pool hidden states into a single context vector via attention.
+        """Pool a sequence of 128-num GRU memories into ONE 128-num summary.
+
+        Intuition
+        ---------
+        The GRU gave us 50 memory snapshots per session — one for every
+        item position. To score next-item candidates we need *one* vector
+        summarising the whole session, not 50.
+
+        Attention solves this as a *learned weighted average*:
+            summary = w₁ · h₁ + w₂ · h₂ + ... + w₅₀ · h₅₀
+        where the weights wᵢ sum to 1.0 and are CHOSEN BY THE MODEL based
+        on how relevant each position is. Positions the model finds
+        informative get higher weight; PAD positions get weight 0.
+
+        Where do the weights come from? We:
+          1. Build a "query" vector — the average of the real (non-PAD)
+             hidden states. It represents the session's overall content.
+          2. Compute a similarity score between the query and each
+             individual hidden state ("keys").
+          3. Softmax those scores → weights summing to 1.
+          4. Use the weights to average the "values" (= hidden states).
+
+        The "multi-head" trick repeats this in parallel with different
+        learned projections so the model can attend to multiple types of
+        patterns at once (e.g. recency, category, brand). We then merge.
 
         Args:
-            hidden_states: FloatTensor [B, L, H] — GRU output.
-            mask:          FloatTensor [B, L] — 1 for real tokens, 0 for PAD.
+            hidden_states: [B, L, H] — the GRU memories from the encoder.
+                           Each [b, t, :] is the GRU's 128-num memory
+                           for session b after reading item t.
+            mask:          [B, L]    — 1.0 for real items, 0.0 for PAD.
 
         Returns:
-            context:       FloatTensor [B, H] — attended session representation.
-            attn_weights:  FloatTensor [B, L] — per-token attention weights
-                           (summing to 1.0 over real tokens per sample).
+            context:       [B, H]    — the ONE session-summary vector
+                                       per batch element.
+            attn_weights:  [B, L]    — how much each position contributed
+                                       (sums to 1.0 over real positions).
+                                       Shown as the demo's bar chart.
         """
+        # B = batch size, L = seq len (50), H = hidden dim (128).
         B, L, H = hidden_states.shape
 
-        # ── Query: mean of non-padded hidden states ──────────────────────────
-        # mask: [B, L] → [B, L, 1] for broadcasting
+        # ── STEP A: build the QUERY = mean of non-PAD hidden states ──────────
+        # We need a "what is this session about?" vector to compare each
+        # position against. The simplest choice: take the average of all
+        # real (non-PAD) hidden states. That gives one 128-num query per
+        # session, representing a coarse summary of the session's content.
         mask_3d = mask.unsqueeze(-1).float()                       # [B, L, 1]
-        n_real = mask_3d.sum(dim=1).clamp(min=1.0)                # [B, 1]
-        query = (hidden_states * mask_3d).sum(dim=1) / n_real     # [B, H]
+        n_real = mask_3d.sum(dim=1).clamp(min=1.0)                 # [B, 1] — how many real items
+        query = (hidden_states * mask_3d).sum(dim=1) / n_real     # [B, H] — average over real items
 
-        # ── Projections ──────────────────────────────────────────────────────
+        # ── STEP B: apply LEARNED projections to query / keys / values ───────
+        # In raw attention we'd compare `query` directly against `hidden_states`.
+        # But we want the model to LEARN what "similar" means, so we pass each
+        # through a trainable linear layer that can reshape the vectors into
+        # whatever space makes attention work best for our task.
+        #   Q (query)  = self.q_proj(query)         — what we're looking FOR
+        #   K (keys)   = self.k_proj(hidden_states) — what to match against
+        #   V (values) = self.v_proj(hidden_states) — what to weight & sum
+        # The Q-K-V naming comes from the original Transformer paper.
         Q = self.q_proj(query)                                     # [B, H]
         K = self.k_proj(hidden_states)                             # [B, L, H]
         V = self.v_proj(hidden_states)                             # [B, L, H]
 
-        # Reshape to multi-head: [B, num_heads, *, head_dim]
-        Q = Q.view(B, self.num_heads, self.head_dim)               # [B, nh, hd]
+        # ── STEP C: split into multiple ATTENTION HEADS (4 heads × 32 dims) ──
+        # Instead of computing one big similarity score over 128 dimensions,
+        # we split each vector into 4 chunks of 32 dimensions and let each
+        # chunk compute its own attention pattern in parallel. Then we
+        # concatenate the results. This lets the model attend to different
+        # *types* of patterns (e.g. one head learns recency, another learns
+        # category similarity). It's strictly more expressive than one head.
+        Q = Q.view(B, self.num_heads, self.head_dim)               # [B, nh, hd] = [B, 4, 32]
         K = K.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)  # [B, nh, L, hd]
         V = V.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)  # [B, nh, L, hd]
 
-        # Q: [B, nh, hd] → [B, nh, 1, hd] for batched matmul
+        # Q is a single query per session, K/V have one vector per position.
+        # Add a length-1 dim to Q so we can batch-matmul against K's L positions.
         Q = Q.unsqueeze(2)                                         # [B, nh, 1, hd]
 
-        # ── Scaled dot-product scores ─────────────────────────────────────────
+        # ── STEP D: SCALED DOT-PRODUCT SCORES ────────────────────────────────
+        # For each head, compute the dot product of the query with every key.
+        # High dot product = "this position's vector points in a similar
+        # direction to the query" = "this position is relevant."
+        # We divide by √head_dim to keep the numbers in a sane range before
+        # softmax (otherwise large dimensions make softmax saturate).
         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale  # [B, nh, 1, L]
         scores = scores.squeeze(2)                                  # [B, nh, L]
 
-        # ── Apply padding mask (fill PAD positions with large negative) ───────
-        # mask: [B, L] → [B, 1, L] → broadcast over heads
+        # ── STEP E: MASK OUT PAD positions ──────────────────────────────────
+        # Set the score at PAD positions to a huge negative number so that
+        # softmax later assigns them ~0 weight. We don't want the model to
+        # accidentally "attend to" filler tokens.
         pad_mask = (mask == 0).unsqueeze(1)                        # [B, 1, L]
         scores = scores.masked_fill(pad_mask, MASK_FILL_VALUE)     # [B, nh, L]
 
-        # ── Softmax → dropout ─────────────────────────────────────────────────
+        # ── STEP F: SOFTMAX scores → attention weights ───────────────────────
+        # Softmax turns raw scores into a probability distribution: every
+        # weight is between 0 and 1, and they sum to 1 across positions.
+        # PAD positions get ~0 because their score was -1e9.
         attn = F.softmax(scores, dim=-1)                           # [B, nh, L]
-        attn = self.attn_dropout(attn)
+        attn = self.attn_dropout(attn)                             # regularisation
 
-        # ── Weighted sum over values ──────────────────────────────────────────
-        # attn: [B, nh, L] → [B, nh, 1, L]
+        # ── STEP G: WEIGHTED AVERAGE of the value vectors ────────────────────
+        # Now use those weights to combine the value vectors.
+        # context_heads[b, head, :] = Σₜ attn[b, head, t] · V[b, head, t, :]
+        # This is the "weighted average" we wanted — one 32-num vector per head.
         context_heads = torch.matmul(
             attn.unsqueeze(2), V
         ).squeeze(2)                                               # [B, nh, hd]
-        context_heads = context_heads.contiguous().view(B, H)     # [B, H]
+
+        # Glue the 4 head outputs (each 32-num) back into one 128-num vector,
+        # then apply a final learned linear transform to mix them.
+        context_heads = context_heads.contiguous().view(B, H)      # [B, H]
         context = self.out_proj(context_heads)                     # [B, H]
 
-        # ── Collapse attention weights across heads (mean) ────────────────────
+        # ── STEP H: average the per-head attention weights for visualisation ─
+        # The 4 heads might disagree about which positions matter. For the
+        # demo's bar chart we just take the mean across heads — one weight
+        # per input position, summing to 1.
         attn_weights = attn.mean(dim=1)                            # [B, L]
 
         return context, attn_weights

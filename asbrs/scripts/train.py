@@ -39,6 +39,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%H:%M:%S",
 )
+# Silence the per-step / per-epoch INFO logs from the model so we get a clean
+# table of one summary line per epoch (printed manually in the loop below).
+for noisy in ("models.encoder", "data.preprocessor", "data.vocab"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -73,13 +77,22 @@ def _print_epoch_summary(
     val_metrics: dict,
     is_best: bool,
 ) -> None:
-    """Print a formatted epoch summary table row."""
-    metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
-    best_marker = " [*]" if is_best else ""   # ASCII-safe, no unicode star
+    """Print one fixed-width row per epoch.
+
+    Layout:
+       Epoch  |   loss  | R@5    R@10   R@20   MRR@10  best
+       001/030  9.3850   0.0261  0.0366  0.0545  0.0152   *
+    """
+    r5  = val_metrics.get("Recall@5",  float("nan"))
+    r10 = val_metrics.get("Recall@10", float("nan"))
+    r20 = val_metrics.get("Recall@20", float("nan"))
+    mrr = val_metrics.get("MRR@10",    float("nan"))
+    marker = "*" if is_best else " "
     print(
-        f"  Epoch {epoch+1:03d}/{num_epochs:03d}"
-        f" | loss={train_loss:.4f}"
-        f" | {metrics_str}{best_marker}"
+        f"  {epoch+1:03d}/{num_epochs:03d}  "
+        f"{train_loss:7.4f}  "
+        f"{r5:6.4f}  {r10:6.4f}  {r20:6.4f}  "
+        f"{mrr:7.4f}   {marker}"
     )
 
 
@@ -158,9 +171,11 @@ def main(cfg: Config, device: torch.device, resume: str | None) -> None:
     k_values: List[int] = cfg.evaluation.k_values
 
     print(f"\nTraining for up to {cfg.training.num_epochs} epochs "
-          f"(patience={cfg.training.patience}) on {device}\n")
-    print(f"  {'Epoch':>10} | {'loss':>8} | Recall@10  MRR@10")
-    print("  " + "-" * 50)
+          f"(patience={cfg.training.patience}) on {device}")
+    print("  (a * in the last column marks a new best validation Recall@10)\n")
+    print(f"  {'Epoch':>7}  {'loss':>7}  {'R@5':>6}  {'R@10':>6}  "
+          f"{'R@20':>6}  {'MRR@10':>7}  best")
+    print("  " + "-" * 58)
 
     for epoch in range(cfg.training.num_epochs):
         train_loss = trainer.train_epoch(train_loader, optimizer, device)
